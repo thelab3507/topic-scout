@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Topic scout digest</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="muted eyebrow">The Lab · topic scout</p>
+    <h1>Digest</h1>
+    <p class="muted lead">Candidates the local model scored against the charter. The shortlist needs the model to say pass and every criterion at 4 or higher. You decide what gets built.</p>
+  </header>
+
+  {{with .Banner}}<div class="card alert"><strong>{{.Title}}</strong> <span>{{.Body}}</span></div>{{end}}
+
+  <section class="stats" aria-label="Summary">
+    <div class="card stat"><div class="num">{{len .Shortlist}}</div><div class="label muted">Shortlisted</div></div>
+    <div class="card stat"><div class="num">{{len .Unscored}}</div><div class="label muted">Need review</div></div>
+    <div class="card stat"><div class="num">{{len .Rest}}</div><div class="label muted">Scored, not shortlisted</div></div>
+    <div class="card stat"><div class="num" style="font-size:1rem">{{.LastRunLabel}}</div><div class="label muted">Last run</div></div>
+  </section>
+
+  <h2>Shortlist</h2>
+  <p class="muted section-note">Picked items first, then by total score. Mark one with the commands in its footer, then reload this page.</p>
+  <div class="stack">
+    {{range .Shortlist}}{{template "candidate" .}}{{else}}
+    <div class="card empty muted">Nothing shortlisted in the last {{$.WindowDays}} days.</div>
+    {{end}}
+  </div>
+
+  {{if .Unscored}}
+  <h2>Needs review</h2>
+  <p class="muted section-note">The server never produced a valid verdict for these. They are not failures; they are retried on later runs, up to {{.MaxAttempts}} attempts.</p>
+  <div class="card"><div class="table-wrap"><table>
+    <thead><tr><th>Candidate</th><th>Source</th><th>Attempts</th><th>Last error</th></tr></thead>
+    <tbody>{{range .Unscored}}
+      <tr><td><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a></td><td class="nowrap muted">{{.Source}}</td><td class="nowrap">{{.Attempts}}</td><td class="muted">{{.Error}}</td></tr>
+    {{end}}</tbody>
+  </table></div></div>
+  {{end}}
+
+  <h2>Scored, not shortlisted</h2>
+  <p class="muted section-note">Worth skimming now and then to check that the model is not rejecting good items, or scoring everything a 4.</p>
+  <details class="card panel">
+    <summary>{{len .Rest}} candidates</summary>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Candidate</th><th>Scores</th><th>Model's reason</th></tr></thead>
+      <tbody>{{range .Rest}}
+        <tr>
+          <td><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a><div class="muted">{{.Category}} · {{.Source}} · {{.PublishedLabel}}</div></td>
+          <td class="nowrap"><div class="pills">{{range .Pills}}<span class="badge {{.Class}}" title="{{.Full}}">{{.Value}}</span>{{end}}</div></td>
+          <td>{{.Reason}}{{range .Warnings}}<div class="warn">{{.}}</div>{{end}}</td>
+        </tr>
+      {{end}}</tbody>
+    </table></div>
+  </details>
+
+  {{if .Dismissed}}
+  <h2>Dismissed</h2>
+  <details class="card panel">
+    <summary>{{len .Dismissed}} dismissed</summary>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Candidate</th><th>Note</th><th>Undo</th></tr></thead>
+      <tbody>{{range .Dismissed}}
+        <tr><td><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a></td><td class="muted">{{.Note}}</td><td class="nowrap"><code>scout mark {{.ID}} clear</code></td></tr>
+      {{end}}</tbody>
+    </table></div>
+  </details>
+  {{end}}
+
+  <footer class="muted">Generated {{.GeneratedLabel}} · rubric {{.RubricVersion}} · covers the last {{.WindowDays}} days</footer>
+</main>
+</body>
+</html>
+
+{{define "candidate"}}
+<article class="card{{if eq .Decision "picked"}} picked{{end}}" id="c-{{.ID}}">
+  <div class="card-header">
+    <div class="meta">
+      <span class="badge badge-outline">{{.Category}}</span>
+      <span class="muted">{{.Source}} · {{.PublishedLabel}}</span>
+      {{if .Decision}}<span class="badge badge-default">{{.Decision}}</span>{{end}}
+    </div>
+    <h3><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a></h3>
+  </div>
+  <div class="card-content">
+    <div class="pills">{{range .Pills}}<span class="badge {{.Class}}" title="{{.Full}}">{{.Label}} {{.Value}}</span>{{end}}</div>
+    <p class="reason">{{.Reason}}</p>
+    {{range .Warnings}}<p class="warn">{{.}}</p>{{end}}
+    {{if .Note}}<p class="note">Your note: {{.Note}}</p>{{end}}
+    {{with .Novelty}}
+    <details>
+      <summary>{{.Headline}}</summary>
+      <div class="inner">
+        {{if .Skipped}}<p class="muted">Search skipped: {{.Skipped}}</p>{{else}}
+        <p class="muted">Query: <code>{{.Query}}</code></p>
+        {{if .Recent}}<p><strong>Created in the last 30 days</strong></p>{{range .Recent}}<div class="repo"><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.FullName}}</a><span class="muted">★ {{.Stars}} · {{.Description}}</span></div>{{end}}{{end}}
+        {{if .Top}}<p><strong>Top by stars, all time</strong></p>{{range .Top}}<div class="repo"><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.FullName}}</a><span class="muted">★ {{.Stars}} · {{.Description}}</span></div>{{end}}{{end}}
+        {{end}}
+      </div>
+    </details>
+    {{end}}
+    {{if .Summary}}<details><summary>Source text</summary><div class="inner"><p class="muted">{{.Summary}}</p></div></details>{{end}}
+  </div>
+  <div class="card-footer">
+    <span class="muted">{{.ID}}</span>
+    <code>scout mark {{.ID}} picked "note"</code>
+    <code>scout mark {{.ID}} dismissed</code>
+  </div>
+</article>
+{{end}}

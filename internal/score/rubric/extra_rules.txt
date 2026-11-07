@@ -1,0 +1,7 @@
+
+This candidate is not a pure tech item, so it carries real people and real harm and must clear a stricter bar. pass must be false unless ALL of the following hold, in addition to the five scores being 4 or higher:
+1. Credible source: the item is documented by an NGO, a UN agency, a government or established press, not a single viral post.
+2. Open data: the text names or clearly implies open data that a build could use (for example HDX, data.gov.sg, OpenStreetMap or official statistics).
+3. Responder-focused: the useful build would serve NGOs, volunteers or analysts, not affected people directly.
+4. No personal data on vulnerable people would be needed, and no unverified impact claims would have to be made.
+If any of these fails, or the text does not show it, pass must be false and the reason must name the failed rule.

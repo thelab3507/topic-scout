@@ -1,0 +1,9 @@
+# built binaries
+/scout.exe
+/scout
+/dist/
+
+# local scout output if --data-dir points inside the repo
+/data/
+*.jsonl
+.env

@@ -1,0 +1,152 @@
+{
+  "lookback_days": 14,
+  "max_per_run": 150,
+  "sources": [
+    {
+      "name": "GitHub changelog",
+      "type": "rss",
+      "url": "https://github.blog/changelog/feed/",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "Hugging Face blog",
+      "type": "rss",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "Cloudflare blog",
+      "type": "rss",
+      "url": "https://blog.cloudflare.com/rss/",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "Vercel blog",
+      "type": "rss",
+      "url": "https://vercel.com/atom",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "Hacker News best",
+      "type": "hn",
+      "category": "tech",
+      "max_items": 30
+    },
+    {
+      "name": "r/LocalLLaMA",
+      "type": "rss",
+      "url": "https://www.reddit.com/r/LocalLLaMA/top/.rss?t=week",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "r/selfhosted",
+      "type": "rss",
+      "url": "https://www.reddit.com/r/selfhosted/top/.rss?t=week",
+      "category": "tech",
+      "max_items": 6
+    },
+    {
+      "name": "r/gis",
+      "type": "rss",
+      "url": "https://www.reddit.com/r/gis/top/.rss?t=week",
+      "category": "tech",
+      "max_items": 6
+    },
+    {
+      "name": "r/webdev",
+      "type": "rss",
+      "url": "https://www.reddit.com/r/webdev/top/.rss?t=week",
+      "category": "tech",
+      "max_items": 6
+    },
+    {
+      "name": "OpenStreetMap forum",
+      "type": "rss",
+      "url": "https://community.openstreetmap.org/latest.rss",
+      "category": "tech",
+      "max_items": 8
+    },
+    {
+      "name": "ollama releases",
+      "type": "rss",
+      "url": "https://github.com/ollama/ollama/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "ollama/ollama release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "vllm releases",
+      "type": "rss",
+      "url": "https://github.com/vllm-project/vllm/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "vllm-project/vllm release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "claude-code releases",
+      "type": "rss",
+      "url": "https://github.com/anthropics/claude-code/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "anthropics/claude-code release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "uv releases",
+      "type": "rss",
+      "url": "https://github.com/astral-sh/uv/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "astral-sh/uv release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "tailwindcss releases",
+      "type": "rss",
+      "url": "https://github.com/tailwindlabs/tailwindcss/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "tailwindlabs/tailwindcss release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "bun releases",
+      "type": "rss",
+      "url": "https://github.com/oven-sh/bun/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "oven-sh/bun release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "shadcn-ui releases",
+      "type": "rss",
+      "url": "https://github.com/shadcn-ui/ui/releases.atom",
+      "category": "tech",
+      "max_items": 3,
+      "title_prefix": "shadcn-ui/ui release ",
+      "exclude_title": "(?i)(canary|nightly|alpha|beta|rc\\d|preview)"
+    },
+    {
+      "name": "HDX new datasets",
+      "type": "hdx",
+      "category": "humanitarian",
+      "max_items": 40,
+      "exclude_title": "(?i)^(sea ports|airports|points of interest|populated places|cultural places|financial services|health facilities|education facilities|railways|roads|waterways|power plants|places of worship|border crossings|administrative boundaries) of "
+    },
+    {
+      "name": "UN News",
+      "type": "rss",
+      "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+      "category": "global",
+      "max_items": 15
+    }
+  ]
+}
