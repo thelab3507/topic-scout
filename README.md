@@ -21,7 +21,9 @@ fetch  ->  dedupe  ->  health check  ->  score (back to back)  ->  GitHub novelt
    unloads after ~20 s idle and a reload costs 10-12 s.
 4. **Novelty**: for shortlisted items only, two GitHub repository searches (created in the last 30 days, and all-time by
    stars). This is evidence for you, never an automatic rejection.
-5. **Digest**: rebuilds `digest.html`.
+5. **Digest**: rebuilds `digest.html`. It is also rewritten while scoring (at the start, after every 10 results and after
+   every shortlisted one). Those interim pages say "Run in progress" and refresh themselves every 30 seconds; the final
+   write is static. Run `scout open` at any time to see the partial results.
 
 **Shortlisted** means the model said `pass` *and* all five scores are >= 4. A mismatch between `pass` and the scores is
 shown as a warning instead of being trusted silently. Non-`tech` categories (humanitarian, global, local) also get the

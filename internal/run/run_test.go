@@ -23,6 +23,8 @@ import (
 
 var now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 
+const weakOutput = `{"first_or_different":2,"testable_question":3,"fits_timebox":3,"ships_publicly":2,"has_community":2,"pass":false,"reason":"Thin."}`
+
 const goodOutput = `{"first_or_different":4,"testable_question":5,"fits_timebox":4,"ships_publicly":4,"has_community":4,"pass":true,"reason":"Concrete."}`
 
 type env struct {
@@ -336,5 +338,33 @@ func TestNonTechCategoryReachesServerWithExtraRules(t *testing.T) {
 	e.run()
 	if !strings.Contains(body, "stricter bar") || !strings.Contains(body, "Category: humanitarian") {
 		t.Fatalf("request body lacked extra rules: %.200s", body)
+	}
+}
+
+func TestDigestIsWrittenWhileScoringAndFinishesStatic(t *testing.T) {
+	words := []string{"Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliet", "Kilo", "Lima"}
+	titles := make([]string, len(words))
+	for i, w := range words {
+		titles[i] = w + " widget " + w + "ification"
+	}
+	e := setup(t, titles...)
+	seen := map[int]string{}
+	e.inferFn = func(n int) (int, string) {
+		b, _ := os.ReadFile(e.st.DigestPath())
+		seen[n] = string(b)
+		return 200, envelope(weakOutput)
+	}
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d: %s", code, e.log)
+	}
+	if !strings.Contains(seen[1], "0 of 12 scored.") || !strings.Contains(seen[1], `http-equiv="refresh"`) {
+		t.Error("digest should say the run started before the first call")
+	}
+	if !strings.Contains(seen[12], "10 of 12 scored.") {
+		t.Error("digest should be rewritten after every 10 results")
+	}
+	final, _ := os.ReadFile(e.st.DigestPath())
+	if strings.Contains(string(final), `http-equiv="refresh"`) || strings.Contains(string(final), "Run in progress") {
+		t.Error("final digest must be static")
 	}
 }

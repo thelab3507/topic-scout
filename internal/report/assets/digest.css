@@ -80,6 +80,7 @@ p { margin: 0; }
 .stat .label { font-size: 0.8rem; }
 .alert { padding: 0.9rem 1.25rem; margin-top: 1.25rem; box-shadow: 0 0 0 1px var(--destructive); }
 .alert strong { color: var(--destructive); }
+.progress { padding: 0.9rem 1.25rem; margin-top: 1.25rem; box-shadow: 0 0 0 2px var(--primary); }
 
 /* Badge */
 .meta { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; font-size: 0.8rem; }

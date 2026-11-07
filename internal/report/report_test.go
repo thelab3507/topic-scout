@@ -109,6 +109,24 @@ func TestBannerWhenLastRunDidNotFinishNormally(t *testing.T) {
 	}
 }
 
+func TestProgressRefreshesPageAndHidesStaleBanner(t *testing.T) {
+	in := base()
+	in.LastRun = &store.LastRun{FinishedAt: now, Outcome: "skipped", Message: "old problem"}
+	in.Progress = "10 of 129 scored."
+	out := render(t, in)
+	for _, want := range []string{`http-equiv="refresh" content="30"`, "Run in progress", "10 of 129 scored."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(out, "old problem") {
+		t.Error("previous run's banner should not show while a run is in progress")
+	}
+	if out := render(t, base()); strings.Contains(out, `http-equiv="refresh"`) || strings.Contains(out, "Run in progress") {
+		t.Error("a finished digest must be static")
+	}
+}
+
 func TestNoveltyEvidenceShownAndSkippedExplained(t *testing.T) {
 	in := base()
 	in.Records = []store.RecordLine{

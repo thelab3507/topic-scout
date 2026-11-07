@@ -137,7 +137,7 @@ func cmdOpen(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return run.ExitError
 	}
-	if err := run.RenderDigest(st, time.Now()); err != nil {
+	if err := run.RenderDigest(st, time.Now(), ""); err != nil {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}
@@ -174,7 +174,7 @@ func cmdMark(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return run.ExitError
 	}
-	if err := run.RenderDigest(st, time.Now()); err != nil {
+	if err := run.RenderDigest(st, time.Now(), ""); err != nil {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}

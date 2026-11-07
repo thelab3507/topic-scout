@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Topic scout digest</title>
+{{if .Progress}}<meta http-equiv="refresh" content="30">
+{{end}}<title>Topic scout digest</title>
 <style>{{.CSS}}</style>
 </head>
 <body>
@@ -15,6 +16,7 @@
     <p class="muted lead">Candidates the local model scored against the charter. The shortlist needs the model to say pass and every criterion at 4 or higher. You decide what gets built.</p>
   </header>
 
+  {{with .Progress}}<div class="card progress" role="status"><strong>Run in progress.</strong> <span>{{.}} This page refreshes every 30 seconds.</span></div>{{end}}
   {{with .Banner}}<div class="card alert"><strong>{{.Title}}</strong> <span>{{.Body}}</span></div>{{end}}
 
   <section class="stats" aria-label="Summary">

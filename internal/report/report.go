@@ -42,6 +42,9 @@ type Input struct {
 	Novelty       map[string]novelty.Evidence
 	Decisions     map[string]store.DecisionRecord
 	RubricVersion string
+	// Progress is non-empty while a run is still scoring. The page then says so
+	// and refreshes itself; the final write of a run leaves it empty.
+	Progress string
 }
 
 type pill struct {
@@ -78,6 +81,7 @@ type banner struct{ Title, Body string }
 type view struct {
 	CSS                          template.CSS
 	Banner                       *banner
+	Progress                     string
 	Shortlist, Unscored, Rest    []card
 	Dismissed                    []card
 	LastRunLabel, GeneratedLabel string
@@ -124,6 +128,7 @@ func build(in Input) view {
 		MaxAttempts:    store.MaxAttempts,
 		GeneratedLabel: in.Now.Local().Format("2 Jan 2006 15:04"),
 		LastRunLabel:   "no run yet",
+		Progress:       in.Progress,
 	}
 	if lr := in.LastRun; lr != nil {
 		v.LastRunLabel = lr.FinishedAt.Local().Format("2 Jan, 15:04")
@@ -132,6 +137,9 @@ func build(in Input) view {
 		}
 	} else {
 		v.Banner = &banner{Title: "No run recorded yet.", Body: "Run scout once, or wait for the scheduled task."}
+	}
+	if in.Progress != "" {
+		v.Banner = nil // the previous run's outcome is not news while a new run is in flight
 	}
 
 	since := in.Now.AddDate(0, 0, -WindowDays)

@@ -33,6 +33,10 @@ const (
 	ExitUnavailable = 2 // inference server down, draining, or the run was aborted
 )
 
+// previewEvery is how many scored candidates pass between interim digest writes
+// (a shortlisted candidate always triggers one).
+const previewEvery = 10
+
 // Options carries everything a run needs, so tests can swap in fakes.
 type Options struct {
 	Config  *config.Config
@@ -65,7 +69,7 @@ func Run(ctx context.Context, o Options) int {
 		if err := o.Store.WriteLastRun(lr); err != nil {
 			logf("could not write last_run.json: %v", err)
 		}
-		if err := RenderDigest(o.Store, o.Now()); err != nil {
+		if err := RenderDigest(o.Store, o.Now(), ""); err != nil {
 			logf("could not write digest: %v", err)
 		}
 		if msg != "" {
@@ -136,6 +140,13 @@ func Run(ctx context.Context, o Options) int {
 
 	// 4. Score everything back to back.
 	rubric := score.RubricVersion()
+	preview := func(n int) {
+		msg := fmt.Sprintf("%d of %d scored.", n, len(kept))
+		if err := RenderDigest(o.Store, o.Now(), msg); err != nil {
+			logf("could not write digest: %v", err)
+		}
+	}
+	preview(0)
 	var shortlisted []candidate.Candidate
 	n := 0
 	scoreErr := o.Scorer.ScoreAll(ctx, kept, func(c candidate.Candidate, r score.Result) {
@@ -160,6 +171,9 @@ func Run(ctx context.Context, o Options) int {
 		default:
 			lr.Scored++
 			logf("[%d/%d] scored    %s (%d/25)", n, len(kept), c.Title, r.Scores.Total())
+		}
+		if r.Shortlisted || n%previewEvery == 0 {
+			preview(n)
 		}
 	})
 
@@ -200,8 +214,10 @@ func (o Options) addNovelty(ctx context.Context, shortlisted []candidate.Candida
 }
 
 // RenderDigest rebuilds digest.html from the stored state. It is used after
-// every run and by the open and mark commands.
-func RenderDigest(st *store.Store, now time.Time) error {
+// every run and by the open and mark commands, which pass no progress text.
+// While a run is scoring it passes some, which makes the page say so and
+// refresh itself.
+func RenderDigest(st *store.Store, now time.Time, progress string) error {
 	recs, err := st.Results(now.AddDate(0, 0, -report.WindowDays))
 	if err != nil {
 		return err
@@ -220,5 +236,6 @@ func RenderDigest(st *store.Store, now time.Time) error {
 	}
 	return report.Write(st.DigestPath(), report.Input{
 		Now: now, LastRun: last, Records: recs, Novelty: nov, Decisions: dec, RubricVersion: score.RubricVersion(),
+		Progress: progress,
 	})
 }
