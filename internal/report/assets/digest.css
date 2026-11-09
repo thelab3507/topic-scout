@@ -95,6 +95,21 @@ p { margin: 0; }
 .badge-destructive { color: var(--destructive); border-color: color-mix(in oklab, var(--destructive) 40%, transparent); }
 .badge-outline { border-color: var(--border); color: var(--foreground); }
 
+/* Gist, tags and ideas */
+.insight { display: grid; gap: 0.5rem; }
+.gist { font-size: 0.95rem; }
+.tags { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.badge-tag {
+  background: var(--secondary); color: var(--muted-foreground);
+  padding: 0 0.5rem; font-size: 0.7rem; font-weight: 500;
+}
+.ideas { display: grid; gap: 0.35rem; }
+.label-small { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+.idea { display: flex; gap: 0.5rem; align-items: baseline; font-size: 0.85rem; }
+.idea .badge { flex: none; }
+.pattern .card-content { gap: 0.5rem; }
+.pattern p { font-size: 0.9rem; }
+
 .reason { font-size: 0.95rem; }
 .warn { font-size: 0.8rem; color: var(--destructive); }
 .note { font-size: 0.85rem; border-left: 3px solid var(--primary); padding-left: 0.6rem; }

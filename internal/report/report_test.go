@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thelab3507/topic-scout/internal/candidate"
+	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/score"
 	"github.com/thelab3507/topic-scout/internal/store"
@@ -187,5 +188,128 @@ func TestWriteIsAtomic(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(p); !bytes.Contains(b, []byte("<!doctype html>")) {
 		t.Fatal("not html")
+	}
+}
+
+func rich(id, title string, shortlisted bool) store.RecordLine {
+	r := rec(id, title, score.StatusScored, scores(5, 5, 5, 5, 5, true), shortlisted)
+	r.Result.Scores.Gist = "A runtime shipped " + id
+	r.Result.Scores.Tags = []string{"local llm inference", "decision models"}
+	r.Result.Scores.Ideas = []score.Idea{
+		{Kind: score.KindBuild, Title: "What if a CLI picked the quant " + id + "?", Detail: "Write the CLI " + id + "."},
+		{Kind: score.KindExperiment, Title: "What if we measured " + id + "?", Detail: "Time the quants."},
+		{Kind: score.KindContribute, Title: "What if upstream took a patch " + id + "?", Detail: "Send a patch."},
+	}
+	return r
+}
+
+func TestCardsShowGistTagsIdeasAndTheBriefCommand(t *testing.T) {
+	in := base()
+	in.Records = []store.RecordLine{rich("short", "ShortItem", true)}
+	out := render(t, in)
+	for _, want := range []string{
+		"<strong>In short:</strong> A runtime shipped short",
+		`<span class="badge badge-tag">local llm inference</span>`,
+		`<span class="badge badge-tag">decision models</span>`,
+		`What if...`,
+		`<span class="badge badge-default">Build</span>`,
+		`<span class="badge badge-outline">Experiment</span>`,
+		`<span class="badge badge-secondary">Contribute</span>`,
+		"<strong>What if a CLI picked the quant short?</strong>",
+		`<span class="muted">Write the CLI short.</span>`,
+		"scout brief short",
+		"scout mark short picked",
+		"Hook 5", // renamed pill
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("card lacks %q", want)
+		}
+	}
+	if strings.Contains(out, "Question 5") || !strings.Contains(out, `title="Project hook"`) {
+		t.Error("the second pill must be Hook, with the full name Project hook")
+	}
+}
+
+func TestNotShortlistedTableShowsTheSameInsight(t *testing.T) {
+	in := base()
+	r := rich("rest", "RestItem", false)
+	r.Result.Scores.Pass = false
+	in.Records = []store.RecordLine{r}
+	out := render(t, in)
+	table := out[strings.Index(out, "Scored, not shortlisted"):]
+	for _, want := range []string{"In short:", "A runtime shipped rest", "badge-tag", "What if...", "What if a CLI picked the quant rest?", "because"} {
+		if !strings.Contains(table, want) {
+			t.Errorf("table lacks %q", want)
+		}
+	}
+}
+
+func TestOldRecordsWithoutRichFieldsStillRender(t *testing.T) {
+	in := base()
+	in.Records = []store.RecordLine{rec("old", "OldItem", score.StatusScored, scores(5, 5, 5, 5, 5, true), true)}
+	out := render(t, in)
+	if !strings.Contains(out, "OldItem") || strings.Contains(out, "In short:") || strings.Contains(out, "What if...") {
+		t.Fatal("an old record must render without empty gist or ideas blocks")
+	}
+}
+
+func TestInsightIsEscaped(t *testing.T) {
+	in := base()
+	r := rich("x", "X", true)
+	r.Result.Scores.Gist = `<script>alert(1)</script>`
+	r.Result.Scores.Tags = []string{`<b onclick=x>`}
+	r.Result.Scores.Ideas[0].Title = `<img src=x onerror=alert(1)>`
+	in.Records = []store.RecordLine{r}
+	in.Clusters = cluster.File{GeneratedAt: now, Clusters: []cluster.Cluster{{
+		Name: `<script>pat</script>`, Tag: "t", Forming: `<i>f</i>`, Items: []cluster.Item{{Title: `<u>i</u>`, URL: "javascript:alert(1)"}},
+	}}}
+	out := render(t, in)
+	for _, bad := range []string{"<script>", "<img src=x", "<b onclick", "<i>f</i>", "<u>i</u>", `href="javascript:`} {
+		if strings.Contains(out, bad) {
+			t.Errorf("unsafe content leaked: %s", bad)
+		}
+	}
+}
+
+func TestPatternsSectionSitsAboveTheShortlist(t *testing.T) {
+	in := base()
+	in.Records = []store.RecordLine{rich("short", "ShortItem", true)}
+	in.Clusters = cluster.File{GeneratedAt: now, Clusters: []cluster.Cluster{{
+		Tag: "local llm inference", Name: "Local runtimes", Forming: "Runtimes ship quant pickers.", OpenQuestion: "Which quant wins on 8 GB?",
+		Count: 4, Sources: 3,
+		Ideas: []score.Idea{{Kind: score.KindBuild, Title: "What if a picker?", Detail: "Make a picker."}, {Kind: score.KindBuild, Title: "What if two?", Detail: "Make two."}},
+		Items: []cluster.Item{{Title: "Item one", URL: "https://e.com/1", Source: "hn"}, {Title: "Item two", URL: "https://e.com/2", Source: "blog"}},
+	}}}
+	out := render(t, in)
+	if !(strings.Index(out, "<h2>Patterns</h2>") < strings.Index(out, "<h2>Shortlist</h2>")) {
+		t.Fatal("Patterns must come before the Shortlist")
+	}
+	for _, want := range []string{
+		"Local runtimes", "local llm inference", "4 items from 3 sources",
+		"<strong>Forming:</strong> Runtimes ship quant pickers.", "<strong>Open question:</strong> Which quant wins on 8 GB?",
+		"What if a picker?", "<summary>2 items</summary>", `href="https://e.com/1"`, "Item two",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("patterns section lacks %q", want)
+		}
+	}
+	if strings.Contains(out, cluster.NoneNote) {
+		t.Error("the none note must not show when there are patterns")
+	}
+}
+
+func TestPatternsNoteWhenThereAreNone(t *testing.T) {
+	in := base()
+	in.Clusters = cluster.File{GeneratedAt: now, Note: cluster.NoneNote}
+	if out := render(t, in); !strings.Contains(out, "No pattern yet: no topic tag has 3 or more items") {
+		t.Fatal("the pass's note is missing")
+	}
+	in.Clusters = cluster.File{} // never ran
+	if out := render(t, in); !strings.Contains(out, "No pattern pass yet") || !strings.Contains(out, "scout patterns") {
+		t.Fatal("never-ran note missing")
+	}
+	in.Clusters = cluster.File{GeneratedAt: now} // ran, found nothing, no note stored
+	if out := render(t, in); !strings.Contains(out, "No pattern yet") {
+		t.Fatal("an empty pass must still explain itself")
 	}
 }

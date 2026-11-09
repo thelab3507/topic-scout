@@ -5,6 +5,9 @@
 //	novelty.json    GitHub search evidence for shortlisted candidates
 //	decisions.json  the human's picked / dismissed marks
 //	last_run.json   how the most recent run ended
+//	profile.md      optional, hand-written: who the builder is (capped, see MaxProfileBytes)
+//	clusters.json   the weekly patterns pass
+//	briefs/<id>.md  deep-dive briefs written by `scout brief`
 //	run.lock        present only while a run is in progress
 package store
 
@@ -15,7 +18,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/thelab3507/topic-scout/internal/candidate"
 	"github.com/thelab3507/topic-scout/internal/novelty"
@@ -26,6 +31,10 @@ const (
 	// MaxAttempts is how many runs may try an unscored candidate before it is
 	// parked for manual review.
 	MaxAttempts = 3
+
+	// MaxProfileBytes caps profile.md. The profile rides in every prompt and the
+	// model's context is 4096 tokens, so it cannot be allowed to grow.
+	MaxProfileBytes = 1500
 
 	staleLock    = 2 * time.Hour
 	seenRetain   = 90 * 24 * time.Hour
@@ -53,6 +62,35 @@ func (s *Store) path(name string) string { return filepath.Join(s.Dir, name) }
 
 // DigestPath is where the landing page is written.
 func (s *Store) DigestPath() string { return s.path("digest.html") }
+
+// --- profile ----------------------------------------------------------------
+
+// ProfileName is the optional builder profile in the data directory.
+const ProfileName = "profile.md"
+
+// LoadProfile reads profile.md. A missing file is not an error: it returns "".
+// The text is capped at MaxProfileBytes, cut on a rune boundary, and cut is
+// true when something was dropped so the caller can warn.
+func (s *Store) LoadProfile() (text string, cut bool, err error) {
+	b, err := os.ReadFile(s.path(ProfileName))
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	text = strings.ToValidUTF8(string(b), "")
+	text = strings.TrimPrefix(text, "\ufeff") // Notepad's byte-order mark
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	if len(text) > MaxProfileBytes {
+		n := MaxProfileBytes
+		for n > 0 && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		text, cut = text[:n], true
+	}
+	return strings.TrimSpace(text), cut, nil
+}
 
 // --- run lock ---------------------------------------------------------------
 
@@ -286,6 +324,15 @@ func (s *Store) ReadLastRun() (*LastRun, error) {
 	}
 	return &l, nil
 }
+
+// --- other state files --------------------------------------------------------
+
+// LoadJSON reads a state file in the data directory into v. A missing file
+// leaves v untouched.
+func (s *Store) LoadJSON(name string, v any) error { return readJSON(s.path(name), v) }
+
+// SaveJSON replaces a state file in the data directory atomically.
+func (s *Store) SaveJSON(name string, v any) error { return writeJSON(s.path(name), v) }
 
 // --- helpers ----------------------------------------------------------------
 

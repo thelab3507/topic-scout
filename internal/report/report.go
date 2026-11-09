@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/score"
 	"github.com/thelab3507/topic-scout/internal/store"
@@ -42,6 +43,8 @@ type Input struct {
 	Novelty       map[string]novelty.Evidence
 	Decisions     map[string]store.DecisionRecord
 	RubricVersion string
+	// Clusters is the latest weekly pattern pass; the zero value means none yet.
+	Clusters cluster.File
 	// Progress is non-empty while a run is still scoring. The page then says so
 	// and refreshes itself; the final write of a run leaves it empty.
 	Progress string
@@ -61,12 +64,31 @@ type noveltyView struct {
 	Top      []novelty.Repo
 }
 
+// ideaView is one idea as the template shows it: a kind badge, a bold title and
+// a muted detail.
+type ideaView struct {
+	Kind, Class   string
+	Title, Detail string
+}
+
+type patternItem struct{ Title, URL, Source string }
+
+type patternView struct {
+	Name, Tag, CountLabel string
+	Forming, OpenQuestion string
+	Ideas                 []ideaView
+	Items                 []patternItem
+}
+
 type card struct {
 	ID, Title, URL, Source, Category string
 	PublishedLabel                   string
 	Pills                            []pill
 	Total                            int
 	Reason                           string
+	Gist                             string
+	Tags                             []string
+	Ideas                            []ideaView
 	Warnings                         []string
 	Summary                          string
 	Decision, Note                   string
@@ -82,6 +104,9 @@ type view struct {
 	CSS                          template.CSS
 	Banner                       *banner
 	Progress                     string
+	Patterns                     []patternView
+	PatternsNote                 string
+	PatternsLabel                string
 	Shortlist, Unscored, Rest    []card
 	Dismissed                    []card
 	LastRunLabel, GeneratedLabel string
@@ -114,7 +139,7 @@ func Write(path string, in Input) error {
 
 var pillNames = [5][2]string{
 	{"First", "First or different"},
-	{"Question", "Testable question"},
+	{"Hook", "Project hook"},
 	{"Timebox", "Fits the timebox"},
 	{"Ships", "Ships publicly"},
 	{"Community", "Reaches the right people"},
@@ -141,6 +166,8 @@ func build(in Input) view {
 	if in.Progress != "" {
 		v.Banner = nil // the previous run's outcome is not news while a new run is in flight
 	}
+
+	v.Patterns, v.PatternsNote, v.PatternsLabel = patterns(in.Clusters)
 
 	since := in.Now.AddDate(0, 0, -WindowDays)
 	for _, rec := range in.Records {
@@ -188,6 +215,7 @@ func toCard(rec store.RecordLine, in Input) card {
 	}
 	if s := r.Scores; s != nil {
 		out.Reason = s.Reason
+		out.Gist, out.Tags, out.Ideas = s.Gist, s.Tags, ideaViews(s.Ideas)
 		out.Total = s.Total()
 		for i, val := range []int{s.FirstOrDifferent, s.TestableQuestion, s.FitsTimebox, s.ShipsPublicly, s.HasCommunity} {
 			out.Pills = append(out.Pills, pill{Label: pillNames[i][0], Full: pillNames[i][1], Value: val, Class: pillClass(val)})
@@ -199,6 +227,44 @@ func toCard(rec store.RecordLine, in Input) card {
 		}
 	}
 	return out
+}
+
+func ideaViews(ideas []score.Idea) []ideaView {
+	var out []ideaView
+	for _, i := range ideas {
+		class := "badge-outline"
+		switch i.Kind {
+		case score.KindBuild:
+			class = "badge-default"
+		case score.KindContribute:
+			class = "badge-secondary"
+		}
+		out = append(out, ideaView{Kind: i.Kind, Class: class, Title: i.Title, Detail: i.Detail})
+	}
+	return out
+}
+
+// patterns turns the latest pass into what the Patterns section shows. When
+// there is none, the note says why.
+func patterns(f cluster.File) (views []patternView, note, label string) {
+	for _, c := range f.Clusters {
+		pv := patternView{
+			Name: c.Name, Tag: c.Tag, Forming: c.Forming, OpenQuestion: c.OpenQuestion,
+			CountLabel: fmt.Sprintf("%d items from %d sources", c.Count, c.Sources),
+			Ideas:      ideaViews(c.Ideas),
+		}
+		for _, it := range c.Items {
+			pv.Items = append(pv.Items, patternItem{Title: it.Title, URL: it.URL, Source: it.Source})
+		}
+		views = append(views, pv)
+	}
+	if f.GeneratedAt.IsZero() {
+		return views, "No pattern pass yet. It runs at the end of a run once a week, or run scout patterns.", ""
+	}
+	if len(views) == 0 && f.Note == "" {
+		f.Note = cluster.NoneNote
+	}
+	return views, f.Note, f.GeneratedAt.Local().Format("2 Jan, 15:04")
 }
 
 func pillClass(v int) string {

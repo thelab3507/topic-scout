@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thelab3507/topic-scout/internal/candidate"
+	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/config"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/score"
@@ -23,9 +25,13 @@ import (
 
 var now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 
-const weakOutput = `{"first_or_different":2,"testable_question":3,"fits_timebox":3,"ships_publicly":2,"has_community":2,"pass":false,"reason":"Thin."}`
+const richPrefix = `{"gist":"A runtime shipped.","tags":["Local LLM"],"ideas":[{"kind":"Build","title":"What if a CLI?","detail":"Make a CLI."},{"kind":"Contribute","title":"What if a patch?","detail":"Send a patch."}],`
 
-const goodOutput = `{"first_or_different":4,"testable_question":5,"fits_timebox":4,"ships_publicly":4,"has_community":4,"pass":true,"reason":"Concrete."}`
+const weakOutput = richPrefix + `"first_or_different":2,"testable_question":3,"fits_timebox":3,"ships_publicly":2,"has_community":2,"pass":false,"reason":"Thin."}`
+
+const goodOutput = richPrefix + `"first_or_different":4,"testable_question":5,"fits_timebox":4,"ships_publicly":4,"has_community":4,"pass":true,"reason":"Concrete."}`
+
+const patternOutput = `{"name":"Local runtimes","forming":"Runtimes ship quant pickers.","open_question":"Which quant wins on 8 GB?","ideas":[{"kind":"Build","title":"What if a picker?","detail":"Make a picker."},{"kind":"Build","title":"What if two?","detail":"Make two."}]}`
 
 type env struct {
 	st        *store.Store
@@ -35,6 +41,7 @@ type env struct {
 	feedBody  *string
 	mu        sync.Mutex
 	inferReqs int
+	bodies    []string // every inference request body, in order
 	ghReqs    int
 	inferFn   func(n int) (int, string) // n is the 1-based request count
 	opts      Options
@@ -68,8 +75,10 @@ func setup(t *testing.T, titles ...string) *env {
 			io.WriteString(w, `{"status":"ok"}`)
 			return
 		}
+		b, _ := io.ReadAll(r.Body)
 		e.mu.Lock()
 		e.inferReqs++
+		e.bodies = append(e.bodies, string(b))
 		n := e.inferReqs
 		e.mu.Unlock()
 		code, rep := e.inferFn(n)
@@ -126,7 +135,7 @@ func TestFullRunScoresShortlistsAndWritesDigest(t *testing.T) {
 		t.Fatalf("%+v", lr)
 	}
 	recs, _ := e.st.Results(time.Time{})
-	if len(recs) != 2 || recs[0].RubricVersion != score.RubricVersion() {
+	if len(recs) != 2 || recs[0].RubricVersion != score.RubricVersion("") {
 		t.Fatalf("records: %+v", recs)
 	}
 	seen, _ := e.st.LoadSeen()
@@ -366,5 +375,321 @@ func TestDigestIsWrittenWhileScoringAndFinishesStatic(t *testing.T) {
 	final, _ := os.ReadFile(e.st.DigestPath())
 	if strings.Contains(string(final), `http-equiv="refresh"`) || strings.Contains(string(final), "Run in progress") {
 		t.Error("final digest must be static")
+	}
+}
+
+// --- builder profile --------------------------------------------------------
+
+func (e *env) writeProfile(t *testing.T, text string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(e.st.Dir, store.ProfileName), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProfileReachesEveryPromptAndTheRubricVersion(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.writeProfile(t, "Go preferred. Likes geospatial.")
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	if !strings.Contains(e.bodies[0], "About the builder") || !strings.Contains(e.bodies[0], "Go preferred. Likes geospatial.") {
+		t.Fatalf("the scoring prompt lacks the profile: %.300s", e.bodies[0])
+	}
+	recs, _ := e.st.Results(time.Time{})
+	want := score.RubricVersion("Go preferred. Likes geospatial.")
+	if recs[0].RubricVersion != want || want == score.RubricVersion("") {
+		t.Fatalf("record version %s, want %s (and different from the no-profile version)", recs[0].RubricVersion, want)
+	}
+	if html, _ := os.ReadFile(e.st.DigestPath()); !strings.Contains(string(html), "rubric "+want) {
+		t.Error("the digest should show the version that includes the profile")
+	}
+}
+
+func TestOversizedProfileIsCutAndWarnedAbout(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.writeProfile(t, strings.Repeat("a", store.MaxProfileBytes)+"TAILMARKER")
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(e.log.String(), "warning: profile.md is over 1500 bytes") {
+		t.Errorf("no cut warning in the log: %s", e.log)
+	}
+	if strings.Contains(e.bodies[0], "TAILMARKER") || !strings.Contains(e.bodies[0], strings.Repeat("a", store.MaxProfileBytes)) {
+		t.Error("the prompt must carry exactly the first 1500 bytes of the profile")
+	}
+}
+
+func TestUnreadableProfileStopsTheRunInsteadOfScoringWithoutIt(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	if err := os.Mkdir(filepath.Join(e.st.Dir, store.ProfileName), 0o755); err != nil { // reading a directory fails
+		t.Fatal(err)
+	}
+	if code := e.run(); code != ExitError || e.inferReqs != 0 {
+		t.Fatalf("exit %d, requests %d", code, e.inferReqs)
+	}
+	if lr := e.lastRun(t); lr.Outcome != "error" || !strings.Contains(lr.Message, "profile.md") {
+		t.Fatalf("%+v", lr)
+	}
+}
+
+// --- weekly patterns --------------------------------------------------------
+
+// seedTagged stores n already-scored items under one tag, from alternating
+// sources, so a run's one new item (source "feed") completes a pattern.
+func (e *env) seedTagged(t *testing.T, n int, tag string) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("seed%d", i)
+		err := e.st.AppendResult(store.RecordLine{
+			RunAt: now.AddDate(0, 0, -1), RubricVersion: "old",
+			Candidate: candidate.Candidate{ID: id, Source: []string{"hn", "blog"}[i%2], Category: "tech", Title: "Seed " + id,
+				URL: "https://seed.example/" + id, Published: now.AddDate(0, 0, -2)},
+			Result: score.Result{ID: id, Status: score.StatusScored, Scores: &score.Scores{
+				Gist: "Gist " + id, Tags: []string{tag}, Reason: "r",
+				Ideas: []score.Idea{{Kind: score.KindBuild, Title: "t", Detail: "d"}, {Kind: score.KindBuild, Title: "t", Detail: "d"}}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// scoreThenPattern answers the first request as a score and later ones as patterns.
+func scoreThenPattern(patternReply string) func(int) (int, string) {
+	return func(n int) (int, string) {
+		if n == 1 {
+			return 200, envelope(goodOutput)
+		}
+		return 200, envelope(patternReply)
+	}
+}
+
+func (e *env) clusters(t *testing.T) cluster.File {
+	t.Helper()
+	f, err := cluster.Load(e.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestWeeklyPatternPassRunsAfterScoringAndShowsInTheDigest(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 2, "local llm")
+	e.inferFn = scoreThenPattern(patternOutput)
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	if e.inferReqs != 2 || !strings.Contains(e.bodies[1], "topic_pattern") || !strings.Contains(e.bodies[1], "Tag: local llm") {
+		t.Fatalf("want one score then one pattern call, got %d requests", e.inferReqs)
+	}
+	f := e.clusters(t)
+	if !f.GeneratedAt.Equal(now) || len(f.Clusters) != 1 || f.Clusters[0].Name != "Local runtimes" || f.Clusters[0].Count != 3 || f.Clusters[0].Sources != 3 {
+		t.Fatalf("clusters.json: %+v", f)
+	}
+	html, _ := os.ReadFile(e.st.DigestPath())
+	if !strings.Contains(string(html), "Local runtimes") || !strings.Contains(string(html), "Which quant wins on 8 GB?") {
+		t.Error("the digest does not show the pattern")
+	}
+	if lr := e.lastRun(t); lr.Outcome != "ok" {
+		t.Fatalf("%+v", lr)
+	}
+}
+
+func TestPatternPassWaitsSixDays(t *testing.T) {
+	for name, tc := range map[string]struct {
+		age     time.Duration
+		wantRun bool
+	}{
+		"two days ago":   {2 * 24 * time.Hour, false},
+		"just under six": {6*24*time.Hour - time.Minute, false},
+		"exactly six":    {6 * 24 * time.Hour, true},
+		"a month ago":    {30 * 24 * time.Hour, true},
+	} {
+		e := setup(t, "Alpha tool released")
+		e.seedTagged(t, 2, "local llm")
+		prev := cluster.File{GeneratedAt: now.Add(-tc.age), Note: "previous"}
+		if err := cluster.Save(e.st, prev); err != nil {
+			t.Fatal(err)
+		}
+		e.inferFn = scoreThenPattern(patternOutput)
+		if code := e.run(); code != ExitOK {
+			t.Fatalf("%s: exit %d", name, code)
+		}
+		ran := e.inferReqs == 2
+		if ran != tc.wantRun {
+			t.Errorf("%s: pattern pass ran = %v, want %v", name, ran, tc.wantRun)
+		}
+		if !tc.wantRun && e.clusters(t).Note != "previous" {
+			t.Errorf("%s: a pass that did not run must leave clusters.json alone", name)
+		}
+	}
+}
+
+func TestPatternPassDoesNotRunWhenScoringAborted(t *testing.T) {
+	e := setup(t, "Alpha tool released", "Beta framework benchmark")
+	e.seedTagged(t, 3, "local llm")
+	e.inferFn = func(int) (int, string) { return 503, `{"code":"draining"}` }
+	if code := e.run(); code != ExitUnavailable {
+		t.Fatalf("exit %d", code)
+	}
+	if e.inferReqs != 1 {
+		t.Fatalf("an aborted run made %d requests; the pattern pass must not add any", e.inferReqs)
+	}
+	if _, err := os.Stat(filepath.Join(e.st.Dir, cluster.FileName)); !os.IsNotExist(err) {
+		t.Fatal("clusters.json written after an aborted run")
+	}
+}
+
+func TestPatternFailureNeverFailsTheRunAndIsRetriedNextRun(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 2, "local llm")
+	e.inferFn = scoreThenPattern(`{"name":"only a name"}`) // invalid, twice
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("a failed pattern must not fail the run: exit %d\n%s", code, e.log)
+	}
+	if lr := e.lastRun(t); lr.Outcome != "ok" || lr.Scored != 1 {
+		t.Fatalf("%+v", lr)
+	}
+	if !strings.Contains(e.log.String(), `pattern "local llm" skipped`) {
+		t.Errorf("no skip warning in the log: %s", e.log)
+	}
+	if _, err := os.Stat(filepath.Join(e.st.Dir, cluster.FileName)); !os.IsNotExist(err) {
+		t.Fatal("a pass that wrote nothing must not be saved, or it would not be retried for a week")
+	}
+
+	// Next run: nothing new to score, the pass is still due, and it works now.
+	e.inferFn = func(int) (int, string) { return 200, envelope(patternOutput) }
+	before := e.inferReqs
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if e.inferReqs != before+1 || len(e.clusters(t).Clusters) != 1 {
+		t.Fatalf("the quiet-day run should have retried the pass: +%d requests, %+v", e.inferReqs-before, e.clusters(t))
+	}
+}
+
+func TestOnePatternFailingKeepsTheOthers(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 2, "local llm")
+	// A second, smaller pattern: three items under "open data" from two sources.
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("od%d", i)
+		e.st.AppendResult(store.RecordLine{RunAt: now.AddDate(0, 0, -1), Candidate: candidate.Candidate{ID: id, Source: []string{"hn", "blog"}[i%2], Title: id, Published: now.AddDate(0, 0, -2)},
+			Result: score.Result{ID: id, Status: score.StatusScored, Scores: &score.Scores{Tags: []string{"open data"}}}})
+	}
+	e.inferFn = func(n int) (int, string) {
+		switch {
+		case n == 1:
+			return 200, envelope(goodOutput)
+		case n <= 3: // first pattern (3 items, local llm, ties on size with open data: alphabetical => local llm first) fails twice
+			return 200, envelope(`{"nope":1}`)
+		}
+		return 200, envelope(patternOutput)
+	}
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	f := e.clusters(t)
+	if len(f.Clusters) != 1 || f.Clusters[0].Tag != "open data" || !strings.Contains(f.Note, "1 of 2") {
+		t.Fatalf("clusters.json: %+v", f)
+	}
+}
+
+func TestNoPatternsMeansNoModelCallAndANote(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	if code := e.run(); code != ExitOK {
+		t.Fatal(code)
+	}
+	f := e.clusters(t)
+	if e.inferReqs != 1 || len(f.Clusters) != 0 || f.Note != cluster.NoneNote || !f.GeneratedAt.Equal(now) {
+		t.Fatalf("requests=%d file=%+v", e.inferReqs, f)
+	}
+	if html, _ := os.ReadFile(e.st.DigestPath()); !strings.Contains(string(html), "No pattern yet") {
+		t.Error("the digest should show the note")
+	}
+}
+
+func TestDuePatternPassOnAQuietDaySkipsQuietlyWhenTheServerIsDown(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 2, "local llm")
+	e.inferFn = scoreThenPattern(patternOutput)
+	e.run()
+	os.Remove(filepath.Join(e.st.Dir, cluster.FileName)) // make the pass due again
+	e.his.Close()
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("a quiet day with the server down must still exit 0, got %d", code)
+	}
+	if !strings.Contains(e.log.String(), "pattern pass skipped") {
+		t.Errorf("log: %s", e.log)
+	}
+}
+
+func TestPatternsCommandForcesAPassHealthCheckFirstAndUsesTheProfile(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 3, "local llm")
+	e.writeProfile(t, "Go preferred.")
+	if err := cluster.Save(e.st, cluster.File{GeneratedAt: now.Add(-time.Hour), Note: "fresh"}); err != nil { // not due
+		t.Fatal(err)
+	}
+	e.inferFn = func(int) (int, string) { return 200, envelope(patternOutput) }
+	if code := Patterns(context.Background(), e.opts); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	f := e.clusters(t)
+	if e.inferReqs != 1 || len(f.Clusters) != 1 || f.Note != "" {
+		t.Fatalf("a forced pass must run even when the last one is fresh: requests=%d file=%+v", e.inferReqs, f)
+	}
+	if !strings.Contains(e.bodies[0], "Go preferred.") {
+		t.Error("the pattern prompt lacks the profile")
+	}
+	if html, _ := os.ReadFile(e.st.DigestPath()); !strings.Contains(string(html), "Local runtimes") {
+		t.Error("the digest was not rebuilt")
+	}
+}
+
+func TestPatternsCommandReportsADeadServerAndKeepsTheOldResult(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 3, "local llm")
+	old := cluster.File{GeneratedAt: now.AddDate(0, 0, -10), Note: "old result"}
+	cluster.Save(e.st, old)
+	e.his.Close()
+	if code := Patterns(context.Background(), e.opts); code != ExitUnavailable {
+		t.Fatalf("exit %d", code)
+	}
+	if e.clusters(t).Note != "old result" {
+		t.Fatal("a dead server must not overwrite the previous patterns")
+	}
+}
+
+func TestPatternsCommandWithNothingToGroupSavesTheNote(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	if code := Patterns(context.Background(), e.opts); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if f := e.clusters(t); f.Note != cluster.NoneNote || e.inferReqs != 0 {
+		t.Fatalf("file=%+v requests=%d", f, e.inferReqs)
+	}
+}
+
+func TestPatternsCommandReportsWhenEveryPatternFails(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 3, "local llm")
+	e.inferFn = func(int) (int, string) { return 200, envelope(`{"x":1}`) }
+	if code := Patterns(context.Background(), e.opts); code != ExitError {
+		t.Fatalf("exit %d, want %d", code, ExitError)
+	}
+	if _, err := os.Stat(filepath.Join(e.st.Dir, cluster.FileName)); !os.IsNotExist(err) {
+		t.Fatal("nothing was written, so nothing should be saved")
+	}
+}
+
+func TestPatternsCommandRefusesWhileARunHoldsTheLock(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	unlock, _ := e.st.Lock()
+	defer unlock()
+	if code := Patterns(context.Background(), e.opts); code != ExitError || e.inferReqs != 0 {
+		t.Fatalf("exit %d requests %d", code, e.inferReqs)
 	}
 }

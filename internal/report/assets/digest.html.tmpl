@@ -26,6 +26,29 @@
     <div class="card stat"><div class="num" style="font-size:1rem">{{.LastRunLabel}}</div><div class="label muted">Last run</div></div>
   </section>
 
+  <h2>Patterns</h2>
+  <p class="muted section-note">Topics that came up in 3 or more items from 2 or more sources in the last 14 days, rebuilt about once a week.{{with .PatternsLabel}} Last pass {{.}}.{{end}}</p>
+  <div class="stack">
+    {{range .Patterns}}
+    <article class="card pattern">
+      <div class="card-header">
+        <div class="meta"><span class="badge badge-outline">{{.Tag}}</span><span class="muted">{{.CountLabel}}</span></div>
+        <h3>{{.Name}}</h3>
+      </div>
+      <div class="card-content">
+        <p><strong>Forming:</strong> {{.Forming}}</p>
+        <p><strong>Open question:</strong> {{.OpenQuestion}}</p>
+        {{template "ideas" .Ideas}}
+        <details>
+          <summary>{{len .Items}} items</summary>
+          <div class="inner">{{range .Items}}<div class="repo"><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a><span class="muted">{{.Source}}</span></div>{{end}}</div>
+        </details>
+      </div>
+    </article>
+    {{end}}
+    {{with .PatternsNote}}<div class="card empty muted">{{.}}</div>{{end}}
+  </div>
+
   <h2>Shortlist</h2>
   <p class="muted section-note">Picked items first, then by total score. Mark one with the commands in its footer, then reload this page.</p>
   <div class="stack">
@@ -50,12 +73,12 @@
   <details class="card panel">
     <summary>{{len .Rest}} candidates</summary>
     <div class="table-wrap"><table>
-      <thead><tr><th>Candidate</th><th>Scores</th><th>Model's reason</th></tr></thead>
+      <thead><tr><th>Candidate</th><th>Scores</th><th>Model's take</th></tr></thead>
       <tbody>{{range .Rest}}
         <tr>
           <td><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a><div class="muted">{{.Category}} · {{.Source}} · {{.PublishedLabel}}</div></td>
           <td class="nowrap"><div class="pills">{{range .Pills}}<span class="badge {{.Class}}" title="{{.Full}}">{{.Value}}</span>{{end}}</div></td>
-          <td>{{.Reason}}{{range .Warnings}}<div class="warn">{{.}}</div>{{end}}</td>
+          <td>{{template "insight" .}}<div>{{.Reason}}</div>{{range .Warnings}}<div class="warn">{{.}}</div>{{end}}</td>
         </tr>
       {{end}}</tbody>
     </table></div>
@@ -90,6 +113,7 @@
     <h3><a href="{{.URL}}" target="_blank" rel="noreferrer noopener">{{.Title}}</a></h3>
   </div>
   <div class="card-content">
+    {{template "insight" .}}
     <div class="pills">{{range .Pills}}<span class="badge {{.Class}}" title="{{.Full}}">{{.Label}} {{.Value}}</span>{{end}}</div>
     <p class="reason">{{.Reason}}</p>
     {{range .Warnings}}<p class="warn">{{.}}</p>{{end}}
@@ -112,6 +136,18 @@
     <span class="muted">{{.ID}}</span>
     <code>scout mark {{.ID}} picked "note"</code>
     <code>scout mark {{.ID}} dismissed</code>
+    <code>scout brief {{.ID}}</code>
   </div>
 </article>
 {{end}}
+
+{{define "insight"}}{{if or .Gist .Tags .Ideas}}<div class="insight">
+  {{if .Gist}}<p class="gist"><strong>In short:</strong> {{.Gist}}</p>{{end}}
+  {{if .Tags}}<div class="tags">{{range .Tags}}<span class="badge badge-tag">{{.}}</span>{{end}}</div>{{end}}
+  {{template "ideas" .Ideas}}
+</div>{{end}}{{end}}
+
+{{define "ideas"}}{{if .}}<div class="ideas">
+  <div class="label-small muted">What if...</div>
+  {{range .}}<div class="idea"><span class="badge {{.Class}}">{{.Kind}}</span><div><strong>{{.Title}}</strong> <span class="muted">{{.Detail}}</span></div></div>
+  {{end}}</div>{{end}}{{end}}

@@ -3,6 +3,8 @@
 //	scout run  [--config sources.json] [--data-dir DIR] [--limit N] [--dry-run]
 //	scout open [--data-dir DIR]
 //	scout mark [--data-dir DIR] <id> <picked|dismissed|clear> [note]
+//	scout patterns [--data-dir DIR]
+//	scout brief [--data-dir DIR] <id>
 package main
 
 import (
@@ -18,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thelab3507/topic-scout/internal/brief"
+	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/config"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/run"
@@ -33,6 +37,12 @@ const usage = `scout: topic scout for The Lab
       Rebuild the digest and open it in your browser.
   scout mark [--data-dir DIR] <id> <picked|dismissed|clear> [note]
       Record your decision on a candidate (an id prefix is enough).
+  scout patterns [--data-dir DIR]
+      Run the weekly pattern pass now (it also runs at the end of "scout run" once a week).
+  scout brief [--data-dir DIR] <id>
+      Write briefs/<id>.md in the data directory and print it: a deep-dive brief for a stronger assistant.
+
+An optional profile.md in the data directory (max 1500 bytes) describes you; it is added to every prompt.
 
 Environment: THELAB_SCOUT_DATA (data dir), THELAB_GITHUB_TOKEN (optional).
 Exit codes: 0 ok, 1 error, 2 inference server unavailable or run aborted.
@@ -52,6 +62,10 @@ func realMain(args []string) int {
 		return cmdOpen(args[1:])
 	case "mark":
 		return cmdMark(args[1:])
+	case "patterns":
+		return cmdPatterns(args[1:])
+	case "brief":
+		return cmdBrief(args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return run.ExitOK
@@ -137,7 +151,12 @@ func cmdOpen(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return run.ExitError
 	}
-	if err := run.RenderDigest(st, time.Now(), ""); err != nil {
+	profile, err := loadProfile(st)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	if err := run.RenderDigest(st, time.Now(), "", profile); err != nil {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}
@@ -174,11 +193,102 @@ func cmdMark(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return run.ExitError
 	}
-	if err := run.RenderDigest(st, time.Now(), ""); err != nil {
+	profile, err := loadProfile(st)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	if err := run.RenderDigest(st, time.Now(), "", profile); err != nil {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}
 	fmt.Printf("%s: %s. Reload the digest.\n", id, fs.Arg(1))
+	return run.ExitOK
+}
+
+// loadProfile reads profile.md, warning on stderr when it had to be cut.
+func loadProfile(st *store.Store) (string, error) {
+	return run.LoadProfile(st, func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) })
+}
+
+func cmdPatterns(args []string) int {
+	fs := flag.NewFlagSet("patterns", flag.ContinueOnError)
+	dir := fs.String("data-dir", "", "data directory")
+	if err := fs.Parse(args); err != nil {
+		return run.ExitError
+	}
+	d, err := dataDir(*dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	st, err := store.Open(d)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	logw := newLog(d, true)
+	defer logw.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	return run.Patterns(ctx, run.Options{Store: st, Scorer: score.New(), Now: time.Now, Log: logw})
+}
+
+func cmdBrief(args []string) int {
+	fs := flag.NewFlagSet("brief", flag.ContinueOnError)
+	dir := fs.String("data-dir", "", "data directory")
+	if err := fs.Parse(args); err != nil {
+		return run.ExitError
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprint(os.Stderr, "usage: scout brief [--data-dir DIR] <id>\n")
+		return run.ExitError
+	}
+	st, err := openStore(*dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	id, err := st.ResolveID(fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	all, err := st.Results(time.Time{})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	var target *store.RecordLine
+	for i := range all {
+		if all[i].Candidate.ID == id {
+			target = &all[i]
+		}
+	}
+	if target == nil {
+		fmt.Fprintf(os.Stderr, "no candidate with id %q in results\n", id)
+		return run.ExitError
+	}
+	profile, err := loadProfile(st)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	patterns, err := cluster.Load(st)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	text := brief.Build(brief.Input{Record: *target, All: all, Clusters: patterns, Profile: profile})
+	path, err := brief.Write(st, id, text)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return run.ExitError
+	}
+	fmt.Print(text)
+	fmt.Fprintln(os.Stderr, "saved to", path) // stderr, so the brief on stdout can be piped as is
 	return run.ExitOK
 }
 

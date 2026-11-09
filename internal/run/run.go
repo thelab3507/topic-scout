@@ -1,10 +1,12 @@
 // Package run orchestrates one scout pass in a fixed order:
 //
-//	fetch -> dedupe -> health check -> score (back to back) -> GitHub novelty -> digest
+//	fetch -> dedupe -> health check -> score (back to back) -> GitHub novelty -> weekly patterns -> digest
 //
 // The order matters. The inference server unloads its model after ~20 s idle
 // and pays a 10-12 s reload on the next call, so all slow network work happens
-// before scoring starts and GitHub search happens after it ends.
+// before scoring starts and GitHub search and the pattern pass happen after it
+// ends. The pattern pass runs only when the last one is 6 or more days old and
+// scoring did not abort, and nothing it does can fail the run.
 package run
 
 import (
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/thelab3507/topic-scout/internal/candidate"
+	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/config"
 	"github.com/thelab3507/topic-scout/internal/dedupe"
 	"github.com/thelab3507/topic-scout/internal/novelty"
@@ -63,13 +66,18 @@ func Run(ctx context.Context, o Options) int {
 		defer unlock()
 	}
 
+	profile, profileErr := LoadProfile(o.Store, logf)
+	if o.Scorer != nil {
+		o.Scorer.Profile = profile
+	}
+
 	lr := store.LastRun{StartedAt: o.Now()}
 	finish := func(outcome, msg string, code int) int {
 		lr.Outcome, lr.Message, lr.FinishedAt = outcome, msg, o.Now()
 		if err := o.Store.WriteLastRun(lr); err != nil {
 			logf("could not write last_run.json: %v", err)
 		}
-		if err := RenderDigest(o.Store, o.Now(), ""); err != nil {
+		if err := RenderDigest(o.Store, o.Now(), "", profile); err != nil {
 			logf("could not write digest: %v", err)
 		}
 		if msg != "" {
@@ -78,6 +86,10 @@ func Run(ctx context.Context, o Options) int {
 		return code
 	}
 
+	if profileErr != nil {
+		// Scores written under an unknown profile would not be comparable.
+		return finish("error", profileErr.Error(), ExitError)
+	}
 	seen, err := o.Store.LoadSeen()
 	if err != nil {
 		return finish("error", err.Error(), ExitError)
@@ -130,6 +142,7 @@ func Run(ctx context.Context, o Options) int {
 		return ExitOK
 	}
 	if len(kept) == 0 {
+		o.maybePatterns(ctx, profile, logf) // a quiet day is still a fine time for the weekly pass
 		return finish("ok", "", ExitOK)
 	}
 
@@ -139,10 +152,10 @@ func Run(ctx context.Context, o Options) int {
 	}
 
 	// 4. Score everything back to back.
-	rubric := score.RubricVersion()
+	rubric := score.RubricVersion(profile)
 	preview := func(n int) {
 		msg := fmt.Sprintf("%d of %d scored.", n, len(kept))
-		if err := RenderDigest(o.Store, o.Now(), msg); err != nil {
+		if err := RenderDigest(o.Store, o.Now(), msg, profile); err != nil {
 			logf("could not write digest: %v", err)
 		}
 	}
@@ -187,6 +200,9 @@ func Run(ctx context.Context, o Options) int {
 	case scoreErr != nil:
 		return finish("aborted", scoreErr.Error(), ExitUnavailable)
 	}
+
+	// 6. Weekly patterns, only after a clean scoring pass.
+	o.maybePatterns(ctx, profile, logf)
 	return finish("ok", "", ExitOK)
 }
 
@@ -213,11 +229,25 @@ func (o Options) addNovelty(ctx context.Context, shortlisted []candidate.Candida
 	}
 }
 
+// LoadProfile reads the builder profile from the data directory, warning
+// through logf when profile.md had to be cut to its cap. A missing file gives "".
+func LoadProfile(st *store.Store, logf func(string, ...any)) (string, error) {
+	text, cut, err := st.LoadProfile()
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", store.ProfileName, err)
+	}
+	if cut {
+		logf("warning: %s is over %d bytes; only the first %d are used", store.ProfileName, store.MaxProfileBytes, len(text))
+	}
+	return text, nil
+}
+
 // RenderDigest rebuilds digest.html from the stored state. It is used after
 // every run and by the open and mark commands, which pass no progress text.
 // While a run is scoring it passes some, which makes the page say so and
-// refresh itself.
-func RenderDigest(st *store.Store, now time.Time, progress string) error {
+// refresh itself. profile is the builder profile, which the page's rubric
+// version depends on.
+func RenderDigest(st *store.Store, now time.Time, progress, profile string) error {
 	recs, err := st.Results(now.AddDate(0, 0, -report.WindowDays))
 	if err != nil {
 		return err
@@ -234,8 +264,12 @@ func RenderDigest(st *store.Store, now time.Time, progress string) error {
 	if err != nil {
 		return err
 	}
+	patterns, err := cluster.Load(st)
+	if err != nil {
+		return err
+	}
 	return report.Write(st.DigestPath(), report.Input{
-		Now: now, LastRun: last, Records: recs, Novelty: nov, Decisions: dec, RubricVersion: score.RubricVersion(),
-		Progress: progress,
+		Now: now, LastRun: last, Records: recs, Novelty: nov, Decisions: dec, RubricVersion: score.RubricVersion(profile),
+		Clusters: patterns, Progress: progress,
 	})
 }
