@@ -1,10 +1,11 @@
 // Command scout finds, scores and shortlists topic candidates for The Lab.
 //
-//	scout run  [--config sources.json] [--data-dir DIR] [--limit N] [--dry-run]
-//	scout open [--data-dir DIR]
-//	scout mark [--data-dir DIR] <id> <picked|dismissed|clear> [note]
-//	scout patterns [--data-dir DIR]
+//	scout run  [--config sources.json] [--data-dir DIR] [--export-dir DIR] [--limit N] [--dry-run]
+//	scout open [--data-dir DIR] [--export-dir DIR]
+//	scout mark [--data-dir DIR] [--export-dir DIR] <id> <picked|dismissed|clear> [note]
+//	scout patterns [--data-dir DIR] [--export-dir DIR]
 //	scout brief [--data-dir DIR] <id>
+//	scout serve [--addr 127.0.0.1:8787] [--export-dir DIR] [--config sources.json] [--data-dir DIR] [--open]
 package main
 
 import (
@@ -31,20 +32,24 @@ import (
 
 const usage = `scout: topic scout for The Lab
 
-  scout run  [--config sources.json] [--data-dir DIR] [--limit N] [--dry-run]
+  scout run  [--config sources.json] [--data-dir DIR] [--export-dir DIR] [--limit N] [--dry-run]
       Fetch, dedupe, score on the local inference server, check GitHub, write the digest.
-  scout open [--data-dir DIR]
+  scout open [--data-dir DIR] [--export-dir DIR]
       Rebuild the digest and open it in your browser.
-  scout mark [--data-dir DIR] <id> <picked|dismissed|clear> [note]
+  scout mark [--data-dir DIR] [--export-dir DIR] <id> <picked|dismissed|clear> [note]
       Record your decision on a candidate (an id prefix is enough).
-  scout patterns [--data-dir DIR]
+  scout patterns [--data-dir DIR] [--export-dir DIR]
       Run the weekly pattern pass now (it also runs at the end of "scout run" once a week).
   scout brief [--data-dir DIR] <id>
       Write briefs/<id>.md in the data directory and print it: a deep-dive brief for a stronger assistant.
+  scout serve [--addr 127.0.0.1:8787] [--export-dir DIR] [--config sources.json] [--data-dir DIR] [--open]
+      Start the local web console: run the scout, see the next scheduled run, read the log, open earlier reports.
 
 An optional profile.md in the data directory (max 1500 bytes) describes you; it is added to every prompt.
+An export folder (--export-dir, THELAB_SCOUT_EXPORTS, or export_dir in settings.json) receives a copy of
+every finished digest; it must be outside any git repository.
 
-Environment: THELAB_SCOUT_DATA (data dir), THELAB_GITHUB_TOKEN (optional).
+Environment: THELAB_SCOUT_DATA (data dir), THELAB_SCOUT_EXPORTS (export folder), THELAB_GITHUB_TOKEN (optional).
 Exit codes: 0 ok, 1 error, 2 inference server unavailable or run aborted.
 `
 
@@ -66,6 +71,8 @@ func realMain(args []string) int {
 		return cmdPatterns(args[1:])
 	case "brief":
 		return cmdBrief(args[1:])
+	case "serve":
+		return cmdServe(args[1:])
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return run.ExitOK
@@ -92,6 +99,7 @@ func cmdRun(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := fs.String("config", "sources.json", "path to sources.json")
 	dir := fs.String("data-dir", "", "data directory (default: THELAB_SCOUT_DATA or %LOCALAPPDATA%\\thelab-scout)")
+	expFlag := fs.String("export-dir", "", "folder (outside any git repo) that receives a copy of the digest")
 	limit := fs.Int("limit", 0, "score at most N candidates (trial runs)")
 	dry := fs.Bool("dry-run", false, "fetch and dedupe only; never call the server or write state")
 	if err := fs.Parse(args); err != nil {
@@ -115,6 +123,7 @@ func cmdRun(args []string) int {
 
 	logw := newLog(d, !*dry)
 	defer logw.Close()
+	exp := exportDirOrWarn(*expFlag, st)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -129,6 +138,8 @@ func cmdRun(args []string) int {
 		Limit:   *limit,
 		DryRun:  *dry,
 		Log:     logw,
+
+		ExportDir: exp,
 	})
 }
 
@@ -143,6 +154,7 @@ func openStore(dir string) (*store.Store, error) {
 func cmdOpen(args []string) int {
 	fs := flag.NewFlagSet("open", flag.ContinueOnError)
 	dir := fs.String("data-dir", "", "data directory")
+	expFlag := fs.String("export-dir", "", "export folder to refresh")
 	if err := fs.Parse(args); err != nil {
 		return run.ExitError
 	}
@@ -160,6 +172,7 @@ func cmdOpen(args []string) int {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}
+	exportLatest(st, exportDirOrWarn(*expFlag, st))
 	fmt.Println(st.DigestPath())
 	if err := openInBrowser(st.DigestPath()); err != nil {
 		fmt.Fprintln(os.Stderr, "could not open the browser:", err)
@@ -171,6 +184,7 @@ func cmdOpen(args []string) int {
 func cmdMark(args []string) int {
 	fs := flag.NewFlagSet("mark", flag.ContinueOnError)
 	dir := fs.String("data-dir", "", "data directory")
+	expFlag := fs.String("export-dir", "", "export folder to refresh")
 	if err := fs.Parse(args); err != nil {
 		return run.ExitError
 	}
@@ -202,6 +216,7 @@ func cmdMark(args []string) int {
 		fmt.Fprintln(os.Stderr, "digest:", err)
 		return run.ExitError
 	}
+	exportLatest(st, exportDirOrWarn(*expFlag, st))
 	fmt.Printf("%s: %s. Reload the digest.\n", id, fs.Arg(1))
 	return run.ExitOK
 }
@@ -214,6 +229,7 @@ func loadProfile(st *store.Store) (string, error) {
 func cmdPatterns(args []string) int {
 	fs := flag.NewFlagSet("patterns", flag.ContinueOnError)
 	dir := fs.String("data-dir", "", "data directory")
+	expFlag := fs.String("export-dir", "", "folder (outside any git repo) that receives a copy of the digest")
 	if err := fs.Parse(args); err != nil {
 		return run.ExitError
 	}
@@ -233,7 +249,7 @@ func cmdPatterns(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	return run.Patterns(ctx, run.Options{Store: st, Scorer: score.New(), Now: time.Now, Log: logw})
+	return run.Patterns(ctx, run.Options{Store: st, Scorer: score.New(), Now: time.Now, Log: logw, ExportDir: exportDirOrWarn(*expFlag, st)})
 }
 
 func cmdBrief(args []string) int {

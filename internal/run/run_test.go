@@ -18,6 +18,7 @@ import (
 	"github.com/thelab3507/topic-scout/internal/candidate"
 	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/config"
+	"github.com/thelab3507/topic-scout/internal/export"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/score"
 	"github.com/thelab3507/topic-scout/internal/store"
@@ -691,5 +692,124 @@ func TestPatternsCommandRefusesWhileARunHoldsTheLock(t *testing.T) {
 	defer unlock()
 	if code := Patterns(context.Background(), e.opts); code != ExitError || e.inferReqs != 0 {
 		t.Fatalf("exit %d requests %d", code, e.inferReqs)
+	}
+}
+
+// exportTo points the run at a fresh export folder outside the data directory.
+func (e *env) exportTo(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "exports")
+	e.opts.ExportDir = dir
+	return dir
+}
+
+func TestFinishedRunExportsLatestAndAnArchive(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	dir := e.exportTo(t)
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	live, _ := os.ReadFile(e.st.DigestPath())
+	latest, err := os.ReadFile(filepath.Join(dir, "latest.html"))
+	if err != nil || string(latest) != string(live) {
+		t.Fatalf("latest.html must equal the digest: %v", err)
+	}
+	reports, _ := export.List(dir)
+	if len(reports) != 1 {
+		t.Fatalf("want one archive, got %v", reports)
+	}
+	if strings.Contains(string(latest), "Run in progress") {
+		t.Error("an interim page was exported; only the final digest may be")
+	}
+	if !strings.Contains(e.log.String(), "exported ") {
+		t.Errorf("the export is not logged:\n%s", e.log)
+	}
+}
+
+func TestSkippedRunRefreshesLatestButArchivesNothing(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	dir := e.exportTo(t)
+	e.his.Close() // server down
+	if code := e.run(); code != ExitUnavailable {
+		t.Fatalf("exit %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "latest.html")); err != nil {
+		t.Fatalf("latest.html missing: %v", err)
+	}
+	if reports, _ := export.List(dir); len(reports) != 0 {
+		t.Fatalf("a skipped run must not add an archive: %v", reports)
+	}
+}
+
+func TestAbortedRunStillArchivesWhatItScored(t *testing.T) {
+	e := setup(t, "Alpha tool released", "Beta tool released")
+	dir := e.exportTo(t)
+	e.inferFn = func(n int) (int, string) {
+		if n == 1 {
+			return 200, envelope(goodOutput)
+		}
+		return 503, `{"code":"draining","message":"maintenance"}`
+	}
+	if code := e.run(); code != ExitUnavailable {
+		t.Fatalf("exit %d", code)
+	}
+	if reports, _ := export.List(dir); len(reports) != 1 {
+		t.Fatalf("an aborted run scored something and must be archived: %v", reports)
+	}
+}
+
+func TestExportProblemsNeverFailTheRun(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	repo := t.TempDir()
+	os.Mkdir(filepath.Join(repo, ".git"), 0o755)
+	e.opts.ExportDir = filepath.Join(repo, "exports") // inside a git repository
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	if !strings.Contains(e.log.String(), "could not export the digest") {
+		t.Errorf("the refusal must be logged:\n%s", e.log)
+	}
+	if _, err := os.Stat(filepath.Join(repo, "exports")); err == nil {
+		t.Error("nothing may be written inside a git repository")
+	}
+	if _, err := os.Stat(e.st.DigestPath()); err != nil {
+		t.Error("the normal digest must still be written")
+	}
+}
+
+func TestNoExportFolderMeansNoExport(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if strings.Contains(e.log.String(), "export") {
+		t.Errorf("unexpected export logging:\n%s", e.log)
+	}
+}
+
+func TestDryRunExportsNothing(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	dir := e.exportTo(t)
+	e.opts.DryRun = true
+	e.run()
+	if _, err := os.Stat(dir); err == nil {
+		t.Fatal("a dry run must not create the export folder")
+	}
+}
+
+func TestPatternsCommandRefreshesLatestWithoutArchiving(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	dir := e.exportTo(t)
+	e.seedTagged(t, 3, "local llm")
+	e.inferFn = func(int) (int, string) { return 200, envelope(patternOutput) }
+	if code := Patterns(context.Background(), e.opts); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	latest, err := os.ReadFile(filepath.Join(dir, "latest.html"))
+	if err != nil || !strings.Contains(string(latest), "Local runtimes") {
+		t.Fatalf("latest.html must carry the new patterns: %v", err)
+	}
+	if reports, _ := export.List(dir); len(reports) != 0 {
+		t.Fatalf("a patterns pass is not a run: %v", reports)
 	}
 }

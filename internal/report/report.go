@@ -285,6 +285,11 @@ func noveltyHeadline(ev novelty.Evidence) string {
 	return fmt.Sprintf("GitHub novelty check: %d repos in the last 30 days, %d all time", ev.RecentTotal, ev.AllTimeTotal)
 }
 
+// BaseCSS is the digest's stylesheet with the font embedded, shared by other
+// pages (the web console) so they look like the digest and need nothing from
+// the network.
+func BaseCSS() string { return fontFace() + css }
+
 // fontFace embeds the Latin subset of Plus Jakarta Sans Variable (SIL OFL 1.1,
 // see assets/FONT-LICENSE.txt) so the page needs nothing from the network.
 func fontFace() string {

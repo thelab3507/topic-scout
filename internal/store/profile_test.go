@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -83,5 +84,57 @@ func TestLoadAndSaveJSONRoundTrip(t *testing.T) {
 	}
 	if err := s.LoadJSON("x.json", &got); err != nil || got["a"] != 1 {
 		t.Fatalf("got %v err %v", got, err)
+	}
+}
+
+func TestLockedFollowsTheRunLock(t *testing.T) {
+	st, _ := Open(filepath.Join(t.TempDir(), "d"))
+	if st.Locked() {
+		t.Fatal("a fresh store is not locked")
+	}
+	unlock, err := st.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Locked() {
+		t.Fatal("must be locked while a run holds the lock")
+	}
+	unlock()
+	if st.Locked() {
+		t.Fatal("must be unlocked after")
+	}
+	// A lock left behind by a crash does not count once it is stale.
+	lock := filepath.Join(st.Dir, "run.lock")
+	os.WriteFile(lock, []byte("1\n"), 0o600)
+	old := time.Now().Add(-3 * time.Hour)
+	os.Chtimes(lock, old, old)
+	if st.Locked() {
+		t.Fatal("a stale lock must not read as a run in progress")
+	}
+}
+
+func TestSettingsRoundTripAndMissingFile(t *testing.T) {
+	st, _ := Open(filepath.Join(t.TempDir(), "d"))
+	if s, err := st.LoadSettings(); err != nil || s.ExportDir != "" {
+		t.Fatalf("%+v %v", s, err)
+	}
+	if err := st.SaveJSON(SettingsName, Settings{ExportDir: `C:\exports`}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := st.LoadSettings(); err != nil || s.ExportDir != `C:\exports` {
+		t.Fatalf("%+v %v", s, err)
+	}
+	os.WriteFile(filepath.Join(st.Dir, SettingsName), []byte("{oops"), 0o644)
+	if _, err := st.LoadSettings(); err == nil {
+		t.Fatal("a broken settings.json must be an error")
+	}
+}
+
+func TestSettingsFileWithAByteOrderMarkStillLoads(t *testing.T) {
+	st, _ := Open(filepath.Join(t.TempDir(), "d"))
+	body := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"export_dir":"E:/x"}`)...)
+	os.WriteFile(filepath.Join(st.Dir, SettingsName), body, 0o644)
+	if s, err := st.LoadSettings(); err != nil || s.ExportDir != "E:/x" {
+		t.Fatalf("%+v %v", s, err)
 	}
 }

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Scout console</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div>
+      <p class="eyebrow muted">The Lab</p>
+      <h1>Scout console</h1>
+    </div>
+    <p class="muted"><a href="/digest" id="open-digest">Open the current digest</a></p>
+  </div>
+  <p class="lead muted">Start a run, see when the next one is due, follow the log and open earlier reports. Everything here runs on this PC.</p>
+
+  <div id="toast" class="card toast" role="status" aria-live="polite"></div>
+
+  <div class="stats">
+    <div class="card stat"><div class="num small" id="s-state"><span class="dot"></span>Loading…</div><div class="label muted" id="s-state-sub">&nbsp;</div></div>
+    <div class="card stat"><div class="num small" id="s-last">–</div><div class="label muted" id="s-last-sub">Last run</div></div>
+    <div class="card stat"><div class="num small" id="s-next">–</div><div class="label muted" id="s-next-sub">Next scheduled run</div></div>
+    <div class="card stat"><div class="num small" id="s-export">–</div><div class="label muted">Export folder</div></div>
+  </div>
+
+  <h2>Run the scout</h2>
+  <p class="section-note muted">A run fetches, scores on the local inference server and rebuilds the digest. It is the same run the daily task does; the two cannot overlap.</p>
+  <div class="card">
+    <div class="card-content">
+      <div class="controls">
+        <div class="field">
+          <label for="limit">Score at most</label>
+          <input class="input" id="limit" type="number" min="0" max="100" inputmode="numeric" placeholder="all">
+        </div>
+        <label class="check"><input type="checkbox" id="dry"> Dry run (fetch and dedupe only)</label>
+        <span class="spacer"></span>
+        <button class="btn outline" id="btn-patterns" type="button">Update patterns</button>
+        <button class="btn" id="btn-run" type="button">Run scout</button>
+      </div>
+      <p class="muted" id="job-note"></p>
+    </div>
+  </div>
+
+  <h2>Last run</h2>
+  <div class="card">
+    <div class="card-content" id="last-run"><p class="muted">No run yet.</p></div>
+  </div>
+
+  <h2>Log</h2>
+  <p class="section-note muted">The end of <code>scout.log</code>, refreshed while this page is open.</p>
+  <pre class="log" id="log" tabindex="0" aria-label="scout.log"></pre>
+
+  <h2>Reports</h2>
+  <p class="section-note muted" id="reports-note"></p>
+  <div class="card"><div class="table-wrap"><table class="reports" id="reports">
+    <thead><tr><th>Run finished</th><th>Size</th></tr></thead>
+    <tbody></tbody>
+  </table></div></div>
+
+  <footer class="muted">Listening on localhost only. Nothing on this page leaves your machine.</footer>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const fmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const ago = (ms) => {
+  const a = Math.abs(ms), m = Math.round(a / 60000), h = Math.round(a / 3600000), d = Math.round(a / 86400000);
+  return a < 90000 ? "moments" : m < 90 ? m + " min" : h < 36 ? h + " h" : d + " days";
+};
+const when = (iso) => { const t = new Date(iso); const ms = t - Date.now(); return fmt.format(t) + (ms >= 0 ? " (in " : " (") + ago(ms) + (ms >= 0 ? ")" : " ago)"); };
+const kb = (n) => n < 1024 ? n + " B" : (n / 1024).toFixed(0) + " KB";
+
+let busy = false, pollTimer = null, toastTimer = null;
+
+function toast(msg, bad) {
+  const el = $("toast");
+  el.className = "card toast show" + (bad ? " bad" : "");
+  el.replaceChildren();
+  const s = document.createElement("strong");
+  s.textContent = bad ? "Problem: " : "";
+  el.append(s, document.createTextNode(msg));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = "card toast"; }, 8000);
+}
+
+function render(st) {
+  busy = !!st.running;
+  const dot = document.createElement("span");
+  dot.className = "dot" + (busy ? " busy" : "");
+  $("s-state").replaceChildren(dot, document.createTextNode(busy ? "Running " + st.running.kind : "Idle"));
+  $("s-state-sub").textContent = !busy ? "Ready for a run"
+    : st.running.source === "console" ? "Started here" + (st.running.dry_run ? " (dry run)" : "")
+    : "Started by the scheduled task or a terminal";
+
+  const lr = st.last_run;
+  if (lr) {
+    $("s-last").textContent = lr.outcome;
+    $("s-last-sub").textContent = "Last run, " + when(lr.finished_at);
+  } else {
+    $("s-last").textContent = "none yet";
+    $("s-last-sub").textContent = "Last run";
+  }
+
+  const nr = st.next_run || {};
+  if (nr.at) { $("s-next").textContent = when(nr.at); $("s-next-sub").textContent = "Next scheduled run"; }
+  else if (nr.pending) { $("s-next").textContent = "checking…"; $("s-next-sub").textContent = "Next scheduled run"; }
+  else { $("s-next").textContent = "unknown"; $("s-next-sub").textContent = nr.error || "Next scheduled run"; }
+
+  $("s-export").textContent = st.export_dir || "not set";
+
+  $("btn-run").disabled = busy;
+  $("btn-patterns").disabled = busy;
+  const lj = st.last_job;
+  $("job-note").textContent = lj
+    ? "Last job from here: " + lj.kind + (lj.dry_run ? " (dry run)" : "") + ", " + lj.meaning + ", finished " + when(lj.finished_at) + "."
+    : "";
+  $("open-digest").style.display = st.has_digest ? "" : "none";
+
+  renderLastRun(lr);
+  renderLog(st.log || []);
+  renderReports(st);
+}
+
+function renderLastRun(lr) {
+  const box = $("last-run");
+  box.replaceChildren();
+  if (!lr) { const p = document.createElement("p"); p.className = "muted"; p.textContent = "No run yet."; box.append(p); return; }
+  const line = document.createElement("div");
+  line.className = "meta";
+  const parts = [["Fetched", lr.fetched], ["Duplicates", lr.duplicates], ["Scored", lr.scored], ["Unscored", lr.unscored], ["Shortlisted", lr.shortlisted]];
+  const out = document.createElement("span");
+  out.className = "badge " + (lr.outcome === "ok" ? "badge-default" : "badge-destructive");
+  out.textContent = lr.outcome;
+  line.append(out);
+  for (const [k, v] of parts) { const b = document.createElement("span"); b.className = "badge badge-outline"; b.textContent = k + " " + v; line.append(b); }
+  box.append(line);
+  if (lr.message) { const p = document.createElement("p"); p.className = "muted"; p.textContent = lr.message; box.append(p); }
+  if (lr.warnings && lr.warnings.length) {
+    const ul = document.createElement("ul"); ul.className = "warnings muted";
+    for (const w of lr.warnings) { const li = document.createElement("li"); li.textContent = w; ul.append(li); }
+    box.append(ul);
+  }
+}
+
+function renderLog(lines) {
+  const el = $("log");
+  const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  el.textContent = lines.length ? lines.join("\n") : "The log is empty.";
+  if (atEnd) el.scrollTop = el.scrollHeight;
+}
+
+function renderReports(st) {
+  const body = $("reports").querySelector("tbody");
+  body.replaceChildren();
+  const note = $("reports-note");
+  if (!st.export_dir) {
+    note.textContent = "No export folder is set, so only the current digest is kept. Start the console with --export-dir, or save export_dir in settings.json (see the README), to keep a copy of every run.";
+  } else if (st.export_error) {
+    note.textContent = "The export folder cannot be used: " + st.export_error;
+  } else {
+    note.textContent = "Every finished run leaves a dated copy of the digest in " + st.export_dir + ". Each file opens on its own.";
+  }
+  const rows = [];
+  if (st.has_latest) rows.push({ label: "Latest export", href: "/reports/latest.html", size: null });
+  for (const r of st.reports || []) rows.push({ label: fmt.format(new Date(r.at)), href: "/reports/" + encodeURIComponent(r.name), size: r.size });
+  if (!rows.length) {
+    const tr = document.createElement("tr"), td = document.createElement("td");
+    td.colSpan = 2; td.className = "muted"; td.textContent = "No reports yet.";
+    tr.append(td); body.append(tr); return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    const a = document.createElement("a"); a.href = r.href; a.target = "_blank"; a.rel = "noopener"; a.textContent = r.label;
+    const c1 = document.createElement("td"); c1.append(a);
+    const c2 = document.createElement("td"); c2.className = "muted nowrap"; c2.textContent = r.size == null ? "" : kb(r.size);
+    tr.append(c1, c2); body.append(tr);
+  }
+}
+
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    render(await res.json());
+  } catch (e) {
+    $("s-state").textContent = "Console not reachable";
+    $("s-state-sub").textContent = "Is scout serve still running?";
+  }
+  pollTimer = setTimeout(poll, busy ? 2500 : 10000);
+}
+
+async function start(path, body) {
+  $("btn-run").disabled = $("btn-patterns").disabled = true;
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "X-Scout-Request": "1", "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({ message: "HTTP " + res.status }));
+    toast(data.message || "Done.", !res.ok);
+  } catch (e) {
+    toast("Could not reach the console.", true);
+  }
+  poll();
+}
+
+$("btn-run").addEventListener("click", () => {
+  const raw = $("limit").value.trim();
+  const limit = raw === "" ? 0 : Number(raw);
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100) { toast("Score at most: enter a whole number from 0 to 100, or leave it empty.", true); return; }
+  start("/api/run", { limit, dry_run: $("dry").checked });
+});
+$("btn-patterns").addEventListener("click", () => start("/api/patterns"));
+poll();
+</script>
+</body>
+</html>

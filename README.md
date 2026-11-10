@@ -28,6 +28,8 @@ fetch  ->  dedupe  ->  health check  ->  score (back to back)  ->  GitHub novelt
 6. **Digest**: rebuilds `digest.html`. It is also rewritten while scoring (at the start, after every 10 results and after
    every shortlisted one). Those interim pages say "Run in progress" and refresh themselves every 30 seconds; the final
    write is static. Run `scout open` at any time to see the partial results.
+7. **Export** (optional): if an [export folder](#web-console-and-exports) is set, the finished digest is copied there as
+   `latest.html` and as a dated archive file. A problem with the export is logged and never fails the run.
 
 **The rubric (v2)** is built for projects, not just news. The Lab ships a small public project (a tool, app, library,
 integration or upstream contribution, plus a writeup) in 2 weeks, 4 at most, mainly from new tech: developer tools,
@@ -61,6 +63,7 @@ scout open                       # rebuild digest.html and open it
 scout mark <id> picked "why"     # record a decision (an id prefix is enough); also: dismissed, clear
 scout patterns                   # run the weekly pattern pass now (health check first)
 scout brief <id>                 # write briefs/<id>.md in the data directory and print it
+scout serve --open               # the local web console: run, next run, log, earlier reports
 ```
 
 The digest is the landing place: weekly **patterns**, then the shortlist (picked first), items needing review,
@@ -110,16 +113,50 @@ items, search the last 4 weeks for the same topic, say what is really new, name 
 that share a tag, the pattern it belongs to, and your profile. Paste it into a stronger assistant. Every card in the
 digest shows the command.
 
+## Web console and exports
+
+`scout serve` starts a small web page on your own PC (default `http://127.0.0.1:8787/`, `--open` opens it). It is a thin
+layer over the same code the daily task runs; it adds no new way to score anything.
+
+- **Status**: idle or running (and whether the run was started here or by the scheduled task), the last run's outcome
+  and counts, and **when the next scheduled run is** (read from Windows Task Scheduler for the task `TheLabScout`;
+  `--task-name` changes it). If the task is not installed the page says so.
+- **Run the scout**: a button with an optional "score at most N" box and a dry-run tick box (fetch and dedupe only), plus
+  **Update patterns**. It is the same `run.Run` and run lock as the scheduled task, so a console run and the daily run
+  cannot overlap; a second click, or a click while the task is running, is refused with a message.
+- **Log**: the end of `scout.log`, refreshed while the page is open.
+- **Reports**: the current digest, the latest export and every dated archive. Each file is a single self-contained page.
+
+**Exports.** Set an export folder and every finished run leaves a copy of the digest there: `latest.html` (always the
+newest) and `digest-YYYYMMDD-HHMMSS.html` (one per run that scored something, including an aborted one; a skipped run only
+refreshes `latest.html`). `scout mark` and `scout open` refresh `latest.html` too. The scout never deletes archive files,
+so the folder grows by one digest per run. The folder must be **outside every git repository**: the scout refuses one that
+sits inside a repo (it looks for a `.git` in the folder or any parent), so scores cannot reach a public history.
+
+The folder is taken from, in order: `--export-dir`, the `THELAB_SCOUT_EXPORTS` environment variable, `export_dir` in
+`settings.json` in the data directory. The scheduled task starts with no arguments, so use the last one for it:
+
+```powershell
+.\scripts\install-task.ps1 -ExportDir C:\Users\you\topic-scout-exports   # re-run to change; it writes settings.json
+```
+
+**Safety.** The console only listens on a loopback address (`--addr` with anything else is refused), only answers
+requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (against DNS rebinding), and needs an `X-Scout-Request`
+header on anything that changes state, with a matching `Origin` if the browser sends one (so another web page open in
+your browser cannot start a run). There is no login: anyone who can use this PC's browser can use the console. Digests are
+served with a policy that forbids scripts.
+
 ## Install the daily task (Windows)
 
 ```powershell
 .\scripts\install-task.ps1          # builds, installs to %LOCALAPPDATA%\thelab-scout, registers "TheLabScout" daily 09:00
+                                    # add -ExportDir <folder outside any repo> to keep a copy of every digest
 Start-ScheduledTask -TaskName TheLabScout
 .\scripts\uninstall-task.ps1        # removes the task, keeps your data
 ```
 
 Runs as you, only while logged on, with no console window, and runs a missed schedule when the PC is next on.
-State, `digest.html`, `scout.log`, `profile.md`, `clusters.json` and `briefs\` live in `%LOCALAPPDATA%\thelab-scout` (override with `--data-dir` or `THELAB_SCOUT_DATA`).
+State, `digest.html`, `scout.log`, `profile.md`, `settings.json`, `clusters.json` and `briefs\` live in `%LOCALAPPDATA%\thelab-scout` (override with `--data-dir` or `THELAB_SCOUT_DATA`).
 That folder is deliberately outside this repo so scores never end up in a public history.
 
 ## Configuration
@@ -132,6 +169,7 @@ optional `exclude_title` (regex, e.g. to drop release candidates) and `title_pre
 | --- | --- |
 | `THELAB_GITHUB_TOKEN` | Optional. Fine-grained, public-read only. Raises the search limit from 10 to 30 requests/min. |
 | `THELAB_SCOUT_DATA` | Data directory override. |
+| `THELAB_SCOUT_EXPORTS` | Export folder (see above); `--export-dir` wins, `settings.json` is the fallback. |
 
 The rubric lives in `internal/score/rubric/`. Each stored result records a short `rubric_version` hash (rubric, schema
 and builder profile) so scores stay comparable across edits.
@@ -152,6 +190,13 @@ and builder profile) so scores stay comparable across edits.
 - **Patterns lean on tag consistency.** Tags are normalised but not merged, so "local llm" and "local llm inference"
   are different tags. An item can sit under several patterns. A pattern pass needs about a week of tagged results
   before the first one appears.
+- **The console is lightly tested in a browser.** The server, guards and page logic have tests and one manual dry run
+  through a real browser; the page has not been checked on other browsers or on a phone-sized screen. The next-run time
+  needs Windows PowerShell and a task named `TheLabScout` (or `--task-name`); elsewhere it says it cannot tell.
+- **The console can only start what `scout run` can.** It does not mark decisions (use the `scout mark` command shown on
+  each card), and stopping a run from the page is not supported; close the console (Ctrl+C) to cancel a run it started.
+- **Exports are a copy, not a database.** Each archive is a snapshot of the digest at that moment (a 14-day window), so
+  an older archive does not change when you mark things later. Nothing prunes the folder.
 - **Reddit is rate limited to about one request per minute** without credentials, so the four subreddit feeds add a few
   minutes to the fetch phase (it all happens before scoring, so the model is unaffected). Link posts have almost no text
   in the feed, so the model judges them on the title alone.

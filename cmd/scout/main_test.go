@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"github.com/thelab3507/topic-scout/internal/candidate"
 	"github.com/thelab3507/topic-scout/internal/run"
 	"github.com/thelab3507/topic-scout/internal/score"
+	"github.com/thelab3507/topic-scout/internal/serve"
 	"github.com/thelab3507/topic-scout/internal/store"
 )
 
@@ -199,6 +203,148 @@ func TestMarkRendersTheDigestWithTheProfileInTheRubricVersion(t *testing.T) {
 
 func TestUsageMentionsTheNewCommands(t *testing.T) {
 	for _, want := range []string{"scout patterns", "scout brief", "profile.md"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage lacks %q", want)
+		}
+	}
+}
+
+func TestExportDirPrefersFlagThenEnvThenSettings(t *testing.T) {
+	_, st := seeded(t)
+	t.Setenv(exportEnv, "")
+	if got, err := exportDir("", st); got != "" || err != nil {
+		t.Fatalf("nothing set: %q %v", got, err)
+	}
+	if err := st.SaveJSON(store.SettingsName, store.Settings{ExportDir: "from-settings"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := exportDir("", st); filepath.Base(got) != "from-settings" {
+		t.Fatalf("settings: %q", got)
+	}
+	t.Setenv(exportEnv, "from-env")
+	if got, _ := exportDir("", st); filepath.Base(got) != "from-env" {
+		t.Fatalf("env: %q", got)
+	}
+	if got, _ := exportDir("from-flag", st); !filepath.IsAbs(got) || filepath.Base(got) != "from-flag" {
+		t.Fatalf("flag (made absolute): %q", got)
+	}
+}
+
+func TestBrokenSettingsTurnExportsOffInsteadOfBreakingCommands(t *testing.T) {
+	dir, st := seeded(t)
+	t.Setenv(exportEnv, "")
+	if err := os.WriteFile(filepath.Join(dir, store.SettingsName), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exportDir("", st); err == nil {
+		t.Fatal("serve must be told about a broken settings.json")
+	}
+	if got := exportDirOrWarn("", st); got != "" {
+		t.Fatalf("got %q", got)
+	}
+	if code := realMain([]string{"mark", "--data-dir", dir, "abc", "picked"}); code != run.ExitOK {
+		t.Fatalf("mark must still work: exit %d", code)
+	}
+}
+
+func TestMarkRefreshesLatestInTheExportFolder(t *testing.T) {
+	dir, _ := seeded(t)
+	exp := filepath.Join(t.TempDir(), "exports")
+	if code := realMain([]string{"mark", "--data-dir", dir, "--export-dir", exp, "abc", "picked", "good one"}); code != run.ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	html, err := os.ReadFile(filepath.Join(exp, "latest.html"))
+	if err != nil || !strings.Contains(string(html), "good one") {
+		t.Fatalf("latest.html must carry the new decision: %v", err)
+	}
+	if entries, _ := os.ReadDir(exp); len(entries) != 1 {
+		t.Fatalf("marking must not add archives: %v", entries)
+	}
+}
+
+func TestMarkWithAnExportFolderInsideARepoStillRecordsTheDecision(t *testing.T) {
+	dir, st := seeded(t)
+	repo := t.TempDir()
+	os.Mkdir(filepath.Join(repo, ".git"), 0o755)
+	if code := realMain([]string{"mark", "--data-dir", dir, "--export-dir", filepath.Join(repo, "out"), "abc", "picked"}); code != run.ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	if dec, _ := st.LoadDecisions(); dec["abc123def456"].Decision != "picked" {
+		t.Fatal("the decision must be recorded")
+	}
+	if _, err := os.Stat(filepath.Join(repo, "out")); err == nil {
+		t.Fatal("nothing may be written inside a git repository")
+	}
+}
+
+func TestServeRefusesBadInputBeforeListening(t *testing.T) {
+	dir, _ := seeded(t)
+	repo := t.TempDir()
+	os.Mkdir(filepath.Join(repo, ".git"), 0o755)
+	cases := map[string][]string{
+		"public address":   {"serve", "--data-dir", dir, "--addr", "0.0.0.0:8787"},
+		"no port":          {"serve", "--data-dir", dir, "--addr", "127.0.0.1"},
+		"extra argument":   {"serve", "--data-dir", dir, "now"},
+		"bad flag":         {"serve", "--no-such-flag"},
+		"bad task name":    {"serve", "--data-dir", dir, "--task-name", "x'; calc"},
+		"export in a repo": {"serve", "--data-dir", dir, "--export-dir", filepath.Join(repo, "out")},
+		"missing config":   {"serve", "--data-dir", dir, "--config", filepath.Join(dir, "nope.json")},
+	}
+	for name, args := range cases {
+		if code := realMain(args); code != run.ExitError {
+			t.Errorf("%s: exit %d, want %d", name, code, run.ExitError)
+		}
+	}
+}
+
+func TestParseNextRun(t *testing.T) {
+	got, err := parseNextRun("2026-11-10T09:00:00.0000000+08:00\r\n", "TheLabScout")
+	if err != nil || got.UTC() != time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC) {
+		t.Fatalf("%v %v", got, err)
+	}
+	for _, bad := range []string{"", "none", "tomorrow", "10/11/2026"} {
+		if _, err := parseNextRun(bad, "TheLabScout"); err == nil {
+			t.Errorf("%q must fail", bad)
+		}
+	}
+}
+
+func TestConsoleRunnerDryRunUsesTheRealRunPathAndLogsToScoutLog(t *testing.T) {
+	dir, st := seeded(t)
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<rss version="2.0"><channel><item><title>Alpha tool released</title><link>https://e.com/a</link><description>About</description><pubDate>`+
+			time.Now().Add(-time.Hour).UTC().Format(time.RFC1123)+`</pubDate></item></channel></rss>`)
+	}))
+	defer feed.Close()
+	cfg := filepath.Join(dir, "sources.json")
+	os.WriteFile(cfg, []byte(`{"sources":[{"name":"feed","type":"rss","url":"`+feed.URL+`","category":"tech","max_items":5}]}`), 0o644)
+	exp := filepath.Join(t.TempDir(), "exports")
+
+	// A dry run never calls the inference server, so this touches nothing real.
+	code := consoleRunner(st, cfg, exp)(context.Background(), serve.KindRun, serve.JobRequest{DryRun: true, Limit: 3})
+	if code != run.ExitOK {
+		t.Fatalf("exit %d", code)
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "scout.log"))
+	if !strings.Contains(string(log), "would score") {
+		t.Fatalf("the dry run must be visible in scout.log:\n%s", log)
+	}
+	if _, err := os.Stat(exp); err == nil {
+		t.Fatal("a dry run must not export")
+	}
+
+	// A broken config is an error in the log, not a crash.
+	os.WriteFile(cfg, []byte("{"), 0o644)
+	if code := consoleRunner(st, cfg, exp)(context.Background(), serve.KindRun, serve.JobRequest{DryRun: true}); code != run.ExitError {
+		t.Fatalf("exit %d", code)
+	}
+	if code := consoleRunner(st, cfg, exp)(context.Background(), "bogus", serve.JobRequest{}); code != run.ExitError {
+		t.Fatalf("an unknown job kind: exit %d", code)
+	}
+}
+
+func TestUsageMentionsServeAndTheExportFolder(t *testing.T) {
+	for _, want := range []string{"scout serve", "--export-dir", "THELAB_SCOUT_EXPORTS", "settings.json"} {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage lacks %q", want)
 		}

@@ -97,6 +97,8 @@ func Patterns(ctx context.Context, o Options) int {
 		if code == ExitOK {
 			code = ExitError
 		}
+		return code
 	}
+	o.exportDigest(logf, false) // the patterns changed the page, but this is not a new run to archive
 	return code
 }

@@ -7,12 +7,14 @@
 //	last_run.json   how the most recent run ended
 //	profile.md      optional, hand-written: who the builder is (capped, see MaxProfileBytes)
 //	clusters.json   the weekly patterns pass
+//	settings.json   optional machine settings (the export folder), see Settings
 //	briefs/<id>.md  deep-dive briefs written by `scout brief`
 //	run.lock        present only while a run is in progress
 package store
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +118,33 @@ func (s *Store) Lock() (unlock func(), err error) {
 		os.Remove(p)
 	}
 	return nil, errors.New("could not acquire run.lock")
+}
+
+// Locked reports whether a run holds run.lock right now (a stale lock does not
+// count). It only looks; it never takes or clears the lock.
+func (s *Store) Locked() bool {
+	info, err := os.Stat(s.path("run.lock"))
+	return err == nil && time.Since(info.ModTime()) < staleLock
+}
+
+// --- settings ---------------------------------------------------------------
+
+// SettingsName is the optional settings file in the data directory.
+const SettingsName = "settings.json"
+
+// Settings holds the few machine-level choices that must survive without
+// command line flags, because the scheduled task starts scout with none.
+type Settings struct {
+	// ExportDir is a folder outside any git repository that receives a copy of
+	// the digest after every run (see package export).
+	ExportDir string `json:"export_dir,omitempty"`
+}
+
+// LoadSettings reads settings.json. A missing file gives zero Settings.
+func (s *Store) LoadSettings() (Settings, error) {
+	var v Settings
+	err := readJSON(s.path(SettingsName), &v)
+	return v, err
 }
 
 // --- seen -------------------------------------------------------------------
@@ -345,6 +374,7 @@ func readJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF}) // a hand-edited file may start with a BOM
 	if err := json.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}

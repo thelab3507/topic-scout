@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/thelab3507/topic-scout/internal/cluster"
 	"github.com/thelab3507/topic-scout/internal/config"
 	"github.com/thelab3507/topic-scout/internal/dedupe"
+	"github.com/thelab3507/topic-scout/internal/export"
 	"github.com/thelab3507/topic-scout/internal/novelty"
 	"github.com/thelab3507/topic-scout/internal/report"
 	"github.com/thelab3507/topic-scout/internal/score"
@@ -51,6 +53,10 @@ type Options struct {
 	Limit   int  // when > 0, score at most this many candidates (for trial runs)
 	DryRun  bool // fetch and dedupe only; touch nothing and never call the server
 	Log     io.Writer
+
+	// ExportDir, when set, receives a copy of the digest after the run (see
+	// package export). A problem with it is logged and never fails the run.
+	ExportDir string
 }
 
 // Run performs one pass and returns a process exit code.
@@ -79,6 +85,9 @@ func Run(ctx context.Context, o Options) int {
 		}
 		if err := RenderDigest(o.Store, o.Now(), "", profile); err != nil {
 			logf("could not write digest: %v", err)
+		} else {
+			// A run that scored something is worth an archive; a skipped or failed one only refreshes latest.html.
+			o.exportDigest(logf, outcome == "ok" || outcome == "aborted")
 		}
 		if msg != "" {
 			logf("%s: %s", outcome, msg)
@@ -226,6 +235,22 @@ func (o Options) addNovelty(ctx context.Context, shortlisted []candidate.Candida
 	}
 	if err := o.Store.SaveNovelty(known); err != nil {
 		logf("could not save novelty.json: %v", err)
+	}
+}
+
+// exportDigest copies the finished digest into the export folder, if one is
+// configured. Failures are logged and swallowed.
+func (o Options) exportDigest(logf func(string, ...any), archive bool) {
+	if o.ExportDir == "" {
+		return
+	}
+	name, err := export.Snapshot(o.Store.DigestPath(), o.ExportDir, o.Now(), archive)
+	if err != nil {
+		logf("warning: could not export the digest: %v", err)
+		return
+	}
+	if name != "" {
+		logf("exported %s", filepath.Join(o.ExportDir, name))
 	}
 }
 
