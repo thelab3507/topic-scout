@@ -1,12 +1,10 @@
 // Package serve is the scout's local web console: one page on 127.0.0.1 to
-// start a run, see when the next scheduled run happens, follow the log and open
-// the current and earlier digests.
+// start and stop a run, follow the log and open the current and earlier
+// digests. It is the only way the scout is started: nothing runs on a schedule.
 //
-// It is a thin layer. A run started here is the same run.Run the scheduled task
-// executes, behind the same run.lock, so the console and the task cannot
-// overlap. Nothing is reachable from outside the machine, and every request is
-// checked so that a web page open in the same browser cannot drive it (see
-// guard).
+// It is a thin layer over run.Run, behind run.lock. Nothing is reachable from
+// outside the machine, and every request is checked so that a web page open in
+// the same browser cannot drive it (see guard).
 package serve
 
 import (
@@ -46,8 +44,6 @@ const (
 
 	logTailLines = 80
 	logTailBytes = 64 << 10
-	nextRunEvery = 60 * time.Second
-	nextRunWait  = 10 * time.Second
 )
 
 //go:embed assets/console.html
@@ -63,8 +59,9 @@ type JobRequest struct {
 }
 
 // Runner performs one job to completion and returns the scout's exit code
-// (0 ok, 1 error, 2 inference server unavailable). The console never decides
-// how a run works; main supplies the same code path as `scout run`.
+// (0 ok, 1 error, 2 inference server unavailable, 3 stopped). It must return
+// promptly once ctx is cancelled: that is how the Stop button works. The console
+// never decides how a run works; main supplies run.Run and run.Patterns.
 type Runner func(ctx context.Context, kind string, req JobRequest) int
 
 // Server holds the console's state. Fill the exported fields, then use Handler.
@@ -73,23 +70,21 @@ type Server struct {
 	ExportDir string // "" means exports are off
 	Runner    Runner
 	Now       func() time.Time
-	// NextRun reports when the scheduled task fires next. nil means the console
-	// cannot tell (not Windows, or no task installed) and says so.
-	NextRun  func(ctx context.Context) (time.Time, error)
-	MaxLimit int // 0 means DefaultMaxLimit
+	MaxLimit  int // 0 means DefaultMaxLimit
 
 	mu      sync.Mutex
 	running *runningJob
 	last    *JobResult
-	next    nextRunInfo
 	wg      sync.WaitGroup
 	baseCtx context.Context
 }
 
 type runningJob struct {
-	kind    string
-	started time.Time
-	req     JobRequest
+	kind     string
+	started  time.Time
+	req      JobRequest
+	cancel   context.CancelFunc
+	stopping bool
 }
 
 // JobResult is how the last job started from the console ended.
@@ -100,27 +95,16 @@ type JobResult struct {
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 	DryRun     bool      `json:"dry_run,omitempty"`
+	Stopped    bool      `json:"stopped,omitempty"` // ended because Stop was pressed
 }
 
-type nextRunInfo struct {
-	At      time.Time
-	Err     string
-	Checked bool
-}
-
-// Running describes a job in progress, started here or by something else.
+// Running describes a job in progress.
 type Running struct {
 	Kind      string     `json:"kind"`
-	Source    string     `json:"source"` // "console" or "other" (the scheduled task, or a terminal)
+	Source    string     `json:"source"` // "console", or "other" for a run this console did not start (and cannot stop)
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	DryRun    bool       `json:"dry_run,omitempty"`
-}
-
-// NextRunStatus is the "next scheduled run" answer.
-type NextRunStatus struct {
-	At      *time.Time `json:"at,omitempty"`
-	Error   string     `json:"error,omitempty"`
-	Pending bool       `json:"pending,omitempty"`
+	Stopping  bool       `json:"stopping,omitempty"` // Stop was pressed; the job is winding down
 }
 
 // Status is the JSON the page polls.
@@ -129,7 +113,6 @@ type Status struct {
 	Running     *Running        `json:"running"`
 	LastJob     *JobResult      `json:"last_job"`
 	LastRun     *store.LastRun  `json:"last_run"`
-	NextRun     NextRunStatus   `json:"next_run"`
 	ExportDir   string          `json:"export_dir"`
 	ExportError string          `json:"export_error,omitempty"`
 	Reports     []export.Report `json:"reports"`
@@ -166,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("POST /api/run", func(w http.ResponseWriter, r *http.Request) { s.startJob(w, r, KindRun) })
 	mux.HandleFunc("POST /api/patterns", func(w http.ResponseWriter, r *http.Request) { s.startJob(w, r, KindPatterns) })
+	mux.HandleFunc("POST /api/stop", s.stopJob)
 	mux.HandleFunc("GET /digest", s.digest)
 	mux.HandleFunc("GET /reports/{name}", s.report)
 	return guard(mux)
@@ -291,22 +275,11 @@ func (s *Server) snapshot() Status {
 	s.mu.Lock()
 	if s.running != nil {
 		started := s.running.started
-		st.Running = &Running{Kind: s.running.kind, Source: "console", StartedAt: &started, DryRun: s.running.req.DryRun}
+		st.Running = &Running{Kind: s.running.kind, Source: "console", StartedAt: &started, DryRun: s.running.req.DryRun, Stopping: s.running.stopping}
 	}
 	if s.last != nil {
 		last := *s.last
 		st.LastJob = &last
-	}
-	switch {
-	case s.NextRun == nil:
-		st.NextRun.Error = "the console cannot read the scheduler on this machine"
-	case !s.next.Checked:
-		st.NextRun.Pending = true
-	case s.next.Err != "":
-		st.NextRun.Error = s.next.Err
-	default:
-		at := s.next.At
-		st.NextRun.At = &at
 	}
 	s.mu.Unlock()
 
@@ -370,37 +343,6 @@ func tailLog(dir string, n int) []string {
 	return lines
 }
 
-// RefreshNext asks the scheduler once and caches the answer for the page.
-func (s *Server) RefreshNext(ctx context.Context) {
-	if s.NextRun == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, nextRunWait)
-	defer cancel()
-	at, err := s.NextRun(ctx)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.next = nextRunInfo{At: at, Checked: true}
-	if err != nil {
-		s.next.Err = err.Error()
-	}
-}
-
-// WatchNext keeps the next-run answer fresh until ctx ends. Run it in a goroutine.
-func (s *Server) WatchNext(ctx context.Context) {
-	if s.NextRun == nil {
-		return
-	}
-	for {
-		s.RefreshNext(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(nextRunEvery):
-		}
-	}
-}
-
 // --- jobs -------------------------------------------------------------------
 
 type apiReply struct {
@@ -442,15 +384,16 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, kind string) {
 	}
 	if s.Store.Locked() {
 		s.mu.Unlock()
-		reply(w, http.StatusConflict, false, "another scout run is in progress (the scheduled task or a terminal); try again when it ends")
+		reply(w, http.StatusConflict, false, "another scout process holds the run lock (a second console?); try again when it ends")
 		return
 	}
-	job := &runningJob{kind: kind, started: s.now(), req: req}
-	s.running = job
-	ctx := s.baseCtx
-	if ctx == nil {
-		ctx = context.Background()
+	base := s.baseCtx
+	if base == nil {
+		base = context.Background()
 	}
+	ctx, cancel := context.WithCancel(base)
+	job := &runningJob{kind: kind, started: s.now(), req: req, cancel: cancel}
+	s.running = job
 	s.wg.Add(1)
 	s.mu.Unlock()
 
@@ -468,8 +411,29 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request, kind string) {
 	reply(w, http.StatusAccepted, true, what)
 }
 
+// stopJob cancels the job this console started. The job winds down on its own
+// (an in-flight call is abandoned, nothing half-scored is recorded) and the
+// status says "stopping" until it has.
+func (s *Server) stopJob(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.running == nil && s.Store.Locked():
+		reply(w, http.StatusConflict, false, "that run was not started from this console, so it cannot be stopped here")
+	case s.running == nil:
+		reply(w, http.StatusConflict, false, "nothing is running")
+	case s.running.stopping:
+		reply(w, http.StatusAccepted, true, "Already stopping.")
+	default:
+		s.running.stopping = true
+		s.running.cancel()
+		reply(w, http.StatusAccepted, true, "Stopping. Whatever is already scored is kept.")
+	}
+}
+
 func (s *Server) execute(ctx context.Context, job *runningJob) {
 	defer s.wg.Done()
+	defer job.cancel()
 	code := 1
 	func() {
 		defer func() {
@@ -484,6 +448,7 @@ func (s *Server) execute(ctx context.Context, job *runningJob) {
 	s.last = &JobResult{
 		Kind: job.kind, ExitCode: code, Meaning: meaning(code),
 		StartedAt: job.started, FinishedAt: s.now(), DryRun: job.req.DryRun,
+		Stopped: job.stopping,
 	}
 	s.running = nil
 }
@@ -494,6 +459,8 @@ func meaning(code int) string {
 		return "ok"
 	case 2:
 		return "inference server unavailable or the run was aborted"
+	case 3:
+		return "stopped"
 	default:
 		return "error (see the log)"
 	}

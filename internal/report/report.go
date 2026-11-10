@@ -157,11 +157,15 @@ func build(in Input) view {
 	}
 	if lr := in.LastRun; lr != nil {
 		v.LastRunLabel = lr.FinishedAt.Local().Format("2 Jan, 15:04")
-		if lr.Outcome != "ok" {
+		switch lr.Outcome {
+		case "ok":
+		case "stopped":
+			v.Banner = &banner{Title: "The last run was stopped before it finished.", Body: lr.Message}
+		default:
 			v.Banner = &banner{Title: "The last run did not finish normally (" + lr.Outcome + ").", Body: lr.Message}
 		}
 	} else {
-		v.Banner = &banner{Title: "No run recorded yet.", Body: "Run scout once, or wait for the scheduled task."}
+		v.Banner = &banner{Title: "No run recorded yet.", Body: "Start a run from the scout console."}
 	}
 	if in.Progress != "" {
 		v.Banner = nil // the previous run's outcome is not news while a new run is in flight

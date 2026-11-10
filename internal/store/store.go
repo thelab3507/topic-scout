@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -96,9 +97,10 @@ func (s *Store) LoadProfile() (text string, cut bool, err error) {
 
 // --- run lock ---------------------------------------------------------------
 
-// Lock prevents two runs (for example the scheduled task and a manual run)
-// from clobbering each other's state. A lock older than two hours is treated as
-// left over from a crash.
+// Lock prevents two runs (for example from two consoles) from clobbering each
+// other's state. A lock is left over, and ignored, when it is older than two
+// hours or when the process that wrote it is gone (the console was killed, or
+// the user logged off, mid-run).
 func (s *Store) Lock() (unlock func(), err error) {
 	p := s.path("run.lock")
 	for attempt := 0; attempt < 2; attempt++ {
@@ -111,8 +113,7 @@ func (s *Store) Lock() (unlock func(), err error) {
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		info, statErr := os.Stat(p)
-		if statErr == nil && time.Since(info.ModTime()) < staleLock {
+		if s.lockHeld() {
 			return nil, errors.New("another scout run is in progress (run.lock exists)")
 		}
 		os.Remove(p)
@@ -122,9 +123,23 @@ func (s *Store) Lock() (unlock func(), err error) {
 
 // Locked reports whether a run holds run.lock right now (a stale lock does not
 // count). It only looks; it never takes or clears the lock.
-func (s *Store) Locked() bool {
-	info, err := os.Stat(s.path("run.lock"))
-	return err == nil && time.Since(info.ModTime()) < staleLock
+func (s *Store) Locked() bool { return s.lockHeld() }
+
+// lockHeld reports whether run.lock exists, is younger than staleLock and was
+// written by a process that is still running. A lock whose content is not a
+// process id (it is being written right now) counts as held.
+func (s *Store) lockHeld() bool {
+	p := s.path("run.lock")
+	info, err := os.Stat(p)
+	if err != nil || time.Since(info.ModTime()) >= staleLock {
+		return false
+	}
+	if b, err := os.ReadFile(p); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 && !processAlive(pid) {
+			return false
+		}
+	}
+	return true
 }
 
 // --- settings ---------------------------------------------------------------
@@ -133,7 +148,7 @@ func (s *Store) Locked() bool {
 const SettingsName = "settings.json"
 
 // Settings holds the few machine-level choices that must survive without
-// command line flags, because the scheduled task starts scout with none.
+// command line flags, because the logon task starts the console with none.
 type Settings struct {
 	// ExportDir is a folder outside any git repository that receives a copy of
 	// the digest after every run (see package export).

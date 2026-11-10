@@ -36,7 +36,13 @@ const (
 	ExitOK          = 0
 	ExitError       = 1
 	ExitUnavailable = 2 // inference server down, draining, or the run was aborted
+	ExitStopped     = 3 // the caller cancelled the run (the console's Stop button)
 )
+
+// stoppedMsg is what last_run.json says after a stop. Nothing was lost: every
+// result already written is kept, and the candidate being scored when the stop
+// came is simply not recorded, so the next run picks it up again.
+const stoppedMsg = "stopped on request; what was scored is kept and the rest is picked up next run"
 
 // previewEvery is how many scored candidates pass between interim digest writes
 // (a shortlisted candidate always triggers one).
@@ -86,8 +92,8 @@ func Run(ctx context.Context, o Options) int {
 		if err := RenderDigest(o.Store, o.Now(), "", profile); err != nil {
 			logf("could not write digest: %v", err)
 		} else {
-			// A run that scored something is worth an archive; a skipped or failed one only refreshes latest.html.
-			o.exportDigest(logf, outcome == "ok" || outcome == "aborted")
+			// A run that scored something is worth an archive (a stopped one too); a skipped or failed one only refreshes latest.html.
+			o.exportDigest(logf, outcome == "ok" || outcome == "aborted" || outcome == "stopped")
 		}
 		if msg != "" {
 			logf("%s: %s", outcome, msg)
@@ -106,6 +112,12 @@ func Run(ctx context.Context, o Options) int {
 
 	// 1. Fetch everything first: slow network calls must not fall between scoring calls.
 	fetched := sources.FetchAll(ctx, o.Config, o.HTTP, o.Now())
+	if ctx.Err() != nil {
+		if o.DryRun {
+			return ExitStopped
+		}
+		return finish("stopped", stoppedMsg, ExitStopped)
+	}
 	lr.Fetched = len(fetched.Candidates)
 	lr.Warnings = fetched.Warnings
 	for _, w := range fetched.Warnings {
@@ -157,6 +169,9 @@ func Run(ctx context.Context, o Options) int {
 
 	// 3. Never start or touch the server: if it is down, stop and say so.
 	if err := o.Scorer.Healthy(ctx); err != nil {
+		if ctx.Err() != nil {
+			return finish("stopped", stoppedMsg, ExitStopped)
+		}
 		return finish("skipped", err.Error()+" (not starting it; the items will be retried next run)", ExitUnavailable)
 	}
 
@@ -198,6 +213,10 @@ func Run(ctx context.Context, o Options) int {
 			preview(n)
 		}
 	})
+
+	if ctx.Err() != nil {
+		return finish("stopped", stoppedMsg, ExitStopped)
+	}
 
 	// 5. GitHub novelty runs after scoring so it never interrupts the model.
 	o.addNovelty(ctx, shortlisted, logf)

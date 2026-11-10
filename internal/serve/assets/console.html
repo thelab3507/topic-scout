@@ -16,19 +16,18 @@
     </div>
     <p class="muted"><a href="/digest" id="open-digest">Open the current digest</a></p>
   </div>
-  <p class="lead muted">Start a run, see when the next one is due, follow the log and open earlier reports. Everything here runs on this PC.</p>
+  <p class="lead muted">Start or stop a run, follow the log and open earlier reports. The scout runs only when you start it here, and everything stays on this PC.</p>
 
   <div id="toast" class="card toast" role="status" aria-live="polite"></div>
 
   <div class="stats">
     <div class="card stat"><div class="num small" id="s-state"><span class="dot"></span>Loading…</div><div class="label muted" id="s-state-sub">&nbsp;</div></div>
     <div class="card stat"><div class="num small" id="s-last">–</div><div class="label muted" id="s-last-sub">Last run</div></div>
-    <div class="card stat"><div class="num small" id="s-next">–</div><div class="label muted" id="s-next-sub">Next scheduled run</div></div>
     <div class="card stat"><div class="num small" id="s-export">–</div><div class="label muted">Export folder</div></div>
   </div>
 
   <h2>Run the scout</h2>
-  <p class="section-note muted">A run fetches, scores on the local inference server and rebuilds the digest. It is the same run the daily task does; the two cannot overlap.</p>
+  <p class="section-note muted">A run fetches, scores on the local inference server and rebuilds the digest. Stop ends it at once: what is already scored is kept and the rest is picked up next run.</p>
   <div class="card">
     <div class="card-content">
       <div class="controls">
@@ -38,6 +37,7 @@
         </div>
         <label class="check"><input type="checkbox" id="dry"> Dry run (fetch and dedupe only)</label>
         <span class="spacer"></span>
+        <button class="btn outline" id="btn-stop" type="button" disabled>Stop</button>
         <button class="btn outline" id="btn-patterns" type="button">Update patterns</button>
         <button class="btn" id="btn-run" type="button">Run scout</button>
       </div>
@@ -92,10 +92,12 @@ function render(st) {
   busy = !!st.running;
   const dot = document.createElement("span");
   dot.className = "dot" + (busy ? " busy" : "");
-  $("s-state").replaceChildren(dot, document.createTextNode(busy ? "Running " + st.running.kind : "Idle"));
+  const stopping = busy && st.running.stopping;
+  $("s-state").replaceChildren(dot, document.createTextNode(!busy ? "Idle" : stopping ? "Stopping " + st.running.kind : "Running " + st.running.kind));
   $("s-state-sub").textContent = !busy ? "Ready for a run"
+    : stopping ? "Winding down; whatever is scored is kept"
     : st.running.source === "console" ? "Started here" + (st.running.dry_run ? " (dry run)" : "")
-    : "Started by the scheduled task or a terminal";
+    : "Started by another process; it cannot be stopped here";
 
   const lr = st.last_run;
   if (lr) {
@@ -106,18 +108,14 @@ function render(st) {
     $("s-last-sub").textContent = "Last run";
   }
 
-  const nr = st.next_run || {};
-  if (nr.at) { $("s-next").textContent = when(nr.at); $("s-next-sub").textContent = "Next scheduled run"; }
-  else if (nr.pending) { $("s-next").textContent = "checking…"; $("s-next-sub").textContent = "Next scheduled run"; }
-  else { $("s-next").textContent = "unknown"; $("s-next-sub").textContent = nr.error || "Next scheduled run"; }
-
   $("s-export").textContent = st.export_dir || "not set";
 
   $("btn-run").disabled = busy;
   $("btn-patterns").disabled = busy;
+  $("btn-stop").disabled = !(busy && st.running.source === "console" && !stopping);
   const lj = st.last_job;
   $("job-note").textContent = lj
-    ? "Last job from here: " + lj.kind + (lj.dry_run ? " (dry run)" : "") + ", " + lj.meaning + ", finished " + when(lj.finished_at) + "."
+    ? "Last job from here: " + lj.kind + (lj.dry_run ? " (dry run)" : "") + ", " + (lj.stopped ? "stopped by you" : lj.meaning) + ", finished " + when(lj.finished_at) + "."
     : "";
   $("open-digest").style.display = st.has_digest ? "" : "none";
 
@@ -134,7 +132,7 @@ function renderLastRun(lr) {
   line.className = "meta";
   const parts = [["Fetched", lr.fetched], ["Duplicates", lr.duplicates], ["Scored", lr.scored], ["Unscored", lr.unscored], ["Shortlisted", lr.shortlisted]];
   const out = document.createElement("span");
-  out.className = "badge " + (lr.outcome === "ok" ? "badge-default" : "badge-destructive");
+  out.className = "badge " + (lr.outcome === "ok" ? "badge-default" : lr.outcome === "stopped" ? "badge-secondary" : "badge-destructive");
   out.textContent = lr.outcome;
   line.append(out);
   for (const [k, v] of parts) { const b = document.createElement("span"); b.className = "badge badge-outline"; b.textContent = k + " " + v; line.append(b); }
@@ -196,7 +194,7 @@ async function poll() {
 }
 
 async function start(path, body) {
-  $("btn-run").disabled = $("btn-patterns").disabled = true;
+  $("btn-run").disabled = $("btn-patterns").disabled = $("btn-stop").disabled = true;
   try {
     const res = await fetch(path, {
       method: "POST",
@@ -218,6 +216,7 @@ $("btn-run").addEventListener("click", () => {
   start("/api/run", { limit, dry_run: $("dry").checked });
 });
 $("btn-patterns").addEventListener("click", () => start("/api/patterns"));
+$("btn-stop").addEventListener("click", () => start("/api/stop"));
 poll();
 </script>
 </body>

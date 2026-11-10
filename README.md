@@ -1,7 +1,7 @@
 # topic-scout
 
 Finds, scores and shortlists news-sparked build ideas for [The Lab](https://github.com/thelab3507/thelab).
-It runs on one PC as a daily scheduled task, scores candidates on a **local** inference server (free, private),
+It runs on one PC, only when you start it from a local web console, scores candidates on a **local** inference server (free, private),
 and writes a single `digest.html` where a human reviews the shortlist and decides what to build.
 
 **Status: Active (v0).** Issues and PRs welcome.
@@ -53,17 +53,22 @@ full-size profile still leaves at least 600 tokens for the candidate.
 
 ## Use it
 
-```
-go build -o scout.exe ./cmd/scout
+The scout starts and stops **only** from the web console. There is no command that runs it, and nothing runs on a
+schedule. Install once (Windows):
 
-scout run --dry-run              # fetch + dedupe only; calls nothing local, writes nothing
-scout run --limit 4              # trial run: score at most 4
-scout run                        # the real thing
+```powershell
+.\scripts\install-console.ps1 -ExportDir C:\Users\you\topic-scout-exports
+```
+
+That builds the scout, keeps the console available whenever you are logged on, and adds a Start menu shortcut. Then
+open **Scout console** from the Start menu (or `http://127.0.0.1:8787/`) and press **Run scout**. See
+[The web console](#the-web-console). Reading and deciding still have commands:
+
+```
+scout serve --open               # start the console by hand and open it (the installer already keeps it running)
 scout open                       # rebuild digest.html and open it
 scout mark <id> picked "why"     # record a decision (an id prefix is enough); also: dismissed, clear
-scout patterns                   # run the weekly pattern pass now (health check first)
 scout brief <id>                 # write briefs/<id>.md in the data directory and print it
-scout serve --open               # the local web console: run, next run, log, earlier reports
 ```
 
 The digest is the landing place: weekly **patterns**, then the shortlist (picked first), items needing review,
@@ -73,8 +78,9 @@ title and a muted detail), the model's reason, the five scores (the second pill 
 the exact `scout mark` and `scout brief` commands. The "Scored, not shortlisted" table shows the same gist, tags and
 ideas. Reload the page after marking.
 
-Exit codes: `0` ok, `1` error, `2` inference server unavailable (down, draining, or the run aborted). If the server
-is down the run is *skipped* and its items are retried next time; the scout never starts or restarts the server.
+If the inference server is down the run is *skipped* (the page says so) and its items are retried next time; the scout
+never starts or restarts the server. A run ends as `ok`, `skipped`, `aborted` (the server is draining or keeps failing),
+`stopped` (you pressed Stop) or `error`.
 
 ## Your profile
 
@@ -87,23 +93,23 @@ Copy-Item profile.example.md "$env:LOCALAPPDATA\thelab-scout\profile.md"
 
 - It is appended to **every** system prompt (scoring and patterns) under "About the builder", so the ideas fit your
   time, languages, hardware and interests, and avoid what you want to avoid. The brief includes it too.
-- It is capped at **1500 bytes**, cut on a character boundary. When it is cut, `run`, `open`, `mark`, `brief` and
-  `patterns` log a warning. Every byte rides in a 4096-token context, which is why the cap exists.
+- It is capped at **1500 bytes**, cut on a character boundary. When it is cut, a run, `open`, `mark` and
+  `brief` log a warning. Every byte rides in a 4096-token context, which is why the cap exists.
 - It is part of the **rubric version**: scores written under different profiles are not comparable, so editing the
   profile changes the hash shown in the digest footer and stored with each result. Old results are not rescored.
-- If it exists but cannot be read, `scout run` stops with an error instead of scoring without it.
+- If it exists but cannot be read, a run stops with an error instead of scoring without it.
 - It lives in the data directory, not the repo, so personal details never reach a public history.
 
 ## Deep dives
 
-**Patterns.** At the end of `scout run`, if the last pass is 6 or more days old and scoring did not abort, the scout
+**Patterns.** At the end of a run, if the last pass is 6 or more days old and scoring did not abort, the scout
 groups scored items from the last 14 days by normalised tag (lower case, spaces collapsed, edge punctuation trimmed). A
 tag is a *pattern* when it has 3 or more items from 2 or more different sources; the biggest 3 are kept. For each, one
 model call (at most 10 items: source, title, gist; strict schema; 600 tokens; profile appended) returns a name, what is
 forming, the open question and 2-3 ideas. It uses the same transport and retry rules as scoring (`Scorer.Ask`). The
 result is saved to `clusters.json` and shown under **Patterns** at the top of the digest, with a collapsible item list.
-When there are none, the digest says so. `scout patterns` forces a pass (after a health check) and takes the run lock
-so it cannot overlap a scheduled run. If every pattern fails, nothing is saved, so the next run tries again.
+When there are none, the digest says so. **Update patterns** in the console forces a pass (after a health check) and takes
+the run lock so it cannot overlap a run. If every pattern fails, nothing is saved, so the next run tries again.
 
 **Briefs.** The local model only sees a feed snippet. For an item worth a closer look, `scout brief <id>` writes
 `briefs/<id>.md` in the data directory and prints it: instructions for a stronger assistant (read the item and related
@@ -113,49 +119,61 @@ items, search the last 4 weeks for the same topic, say what is really new, name 
 that share a tag, the pattern it belongs to, and your profile. Paste it into a stronger assistant. Every card in the
 digest shows the command.
 
-## Web console and exports
+## The web console
 
-`scout serve` starts a small web page on your own PC (default `http://127.0.0.1:8787/`, `--open` opens it). It is a thin
-layer over the same code the daily task runs; it adds no new way to score anything.
+`scout serve` is a small web page on your own PC (default `http://127.0.0.1:8787/`). It is the **only** way to start
+and stop the scout: runs begin when you press **Run scout** and end when they finish or you press **Stop**. The page
+itself is always available, because the installer starts it at every logon (a hidden background task called
+`TheLabConsole`, which serves the page and starts no scouting).
 
-- **Status**: idle or running (and whether the run was started here or by the scheduled task), the last run's outcome
-  and counts, and **when the next scheduled run is** (read from Windows Task Scheduler for the task `TheLabScout`;
-  `--task-name` changes it). If the task is not installed the page says so.
-- **Run the scout**: a button with an optional "score at most N" box and a dry-run tick box (fetch and dedupe only), plus
-  **Update patterns**. It is the same `run.Run` and run lock as the scheduled task, so a console run and the daily run
-  cannot overlap; a second click, or a click while the task is running, is refused with a message.
+- **Status**: idle, running or stopping; the last run's outcome and counts (`ok`, `skipped`, `aborted`, `stopped`,
+  `error`); the export folder.
+- **Run scout**: with an optional "score at most N" box and a dry-run tick box (fetch and dedupe only). **Update
+  patterns** runs the weekly pattern pass now. A second click while something runs is refused with a message.
+- **Stop**: cancels the run at once, including a model call in flight. Whatever is already scored is kept and shown; the
+  candidate being scored when you pressed Stop is not recorded, so the next run picks it up again. The digest says the
+  last run was stopped.
 - **Log**: the end of `scout.log`, refreshed while the page is open.
 - **Reports**: the current digest, the latest export and every dated archive. Each file is a single self-contained page.
 
-**Exports.** Set an export folder and every finished run leaves a copy of the digest there: `latest.html` (always the
-newest) and `digest-YYYYMMDD-HHMMSS.html` (one per run that scored something, including an aborted one; a skipped run only
+**Opening it.** The installer adds a Start menu shortcut called **Scout console** (search for it, or pin it). It runs
+`open-console.ps1`, which opens the page, and starts the console first if it is somehow not running. The same script
+works from any folder: `powershell -File "$env:LOCALAPPDATA\thelab-scout\open-console.ps1"` (`-Port`, `-NoBrowser`).
+
+**Safety.** The console only listens on a loopback address (`--addr` with anything else is refused), only answers
+requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (against DNS rebinding), and needs an `X-Scout-Request`
+header on anything that changes state, with a matching `Origin` if the browser sends one (so another web page open in
+your browser cannot start or stop a run). There is no login: anyone who can use this PC's browser can use the console.
+Digests are served with a policy that forbids scripts.
+
+## Exports
+
+Set an export folder and every finished run leaves a copy of the digest there: `latest.html` (always the newest) and
+`digest-YYYYMMDD-HHMMSS.html` (one per run that scored something, including an aborted or stopped one; a skipped run only
 refreshes `latest.html`). `scout mark` and `scout open` refresh `latest.html` too. The scout never deletes archive files,
 so the folder grows by one digest per run. The folder must be **outside every git repository**: the scout refuses one that
 sits inside a repo (it looks for a `.git` in the folder or any parent), so scores cannot reach a public history.
 
 The folder is taken from, in order: `--export-dir`, the `THELAB_SCOUT_EXPORTS` environment variable, `export_dir` in
-`settings.json` in the data directory. The scheduled task starts with no arguments, so use the last one for it:
+`settings.json` in the data directory. The installer writes the last one for you:
 
 ```powershell
-.\scripts\install-task.ps1 -ExportDir C:\Users\you\topic-scout-exports   # re-run to change; it writes settings.json
+.\scripts\install-console.ps1 -ExportDir C:\Users\you\topic-scout-exports   # re-run to change it
 ```
 
-**Safety.** The console only listens on a loopback address (`--addr` with anything else is refused), only answers
-requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (against DNS rebinding), and needs an `X-Scout-Request`
-header on anything that changes state, with a matching `Origin` if the browser sends one (so another web page open in
-your browser cannot start a run). There is no login: anyone who can use this PC's browser can use the console. Digests are
-served with a policy that forbids scripts.
-
-## Install the daily task (Windows)
+## Install (Windows)
 
 ```powershell
-.\scripts\install-task.ps1          # builds, installs to %LOCALAPPDATA%\thelab-scout, registers "TheLabScout" daily 09:00
+.\scripts\install-console.ps1       # builds, installs to %LOCALAPPDATA%\thelab-scout, keeps the console up at logon
                                     # add -ExportDir <folder outside any repo> to keep a copy of every digest
-Start-ScheduledTask -TaskName TheLabScout
-.\scripts\uninstall-task.ps1        # removes the task, keeps your data
+.\scripts\uninstall-console.ps1     # removes the logon task and the shortcut, stops the console, keeps your data
 ```
 
-Runs as you, only while logged on, with no console window, and runs a missed schedule when the PC is next on.
+The installer registers the `TheLabConsole` task (runs as you, only while logged on, hidden, restarted if it crashes),
+adds the Start menu shortcut, starts the console now, and **removes the old daily `TheLabScout` task** if you have it,
+since the scout no longer runs on a schedule. It refuses to run while a run is in progress (press Stop first), because
+it replaces `scout.exe`. Re-running it is safe; it updates the exe and the task.
+
 State, `digest.html`, `scout.log`, `profile.md`, `settings.json`, `clusters.json` and `briefs\` live in `%LOCALAPPDATA%\thelab-scout` (override with `--data-dir` or `THELAB_SCOUT_DATA`).
 That folder is deliberately outside this repo so scores never end up in a public history.
 
@@ -190,11 +208,12 @@ and builder profile) so scores stay comparable across edits.
 - **Patterns lean on tag consistency.** Tags are normalised but not merged, so "local llm" and "local llm inference"
   are different tags. An item can sit under several patterns. A pattern pass needs about a week of tagged results
   before the first one appears.
-- **The console is lightly tested in a browser.** The server, guards and page logic have tests and one manual dry run
-  through a real browser; the page has not been checked on other browsers or on a phone-sized screen. The next-run time
-  needs Windows PowerShell and a task named `TheLabScout` (or `--task-name`); elsewhere it says it cannot tell.
-- **The console can only start what `scout run` can.** It does not mark decisions (use the `scout mark` command shown on
-  each card), and stopping a run from the page is not supported; close the console (Ctrl+C) to cancel a run it started.
+- **The console is lightly tested in a browser.** The server, guards and page logic have tests and a manual run
+  through a real browser; the page has not been checked on other browsers or on a phone-sized screen. The installer's
+  logon task was registered and started in a throwaway test, but the full installer is only as tested as that.
+- **The console does not mark decisions.** Use the `scout mark` command shown on each card. If the console is killed or
+  you log off mid-run, the leftover `run.lock` is recognised as stale (its process is gone) and ignored, and the
+  interrupted candidate is simply scored in the next run.
 - **Exports are a copy, not a database.** Each archive is a snapshot of the digest at that moment (a 14-day window), so
   an older archive does not change when you mark things later. Nothing prunes the folder.
 - **Reddit is rate limited to about one request per minute** without credentials, so the four subreddit feeds add a few

@@ -3,7 +3,6 @@ package serve
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,7 +57,7 @@ func newRig(t *testing.T) *rig {
 			case <-r.release:
 				return 0
 			case <-ctx.Done():
-				return 2
+				return 3
 			}
 		},
 	}
@@ -319,7 +318,7 @@ func TestRunConflictsWithARunHeldByAnotherProcess(t *testing.T) {
 		t.Fatalf("running = %+v", st.Running)
 	}
 	res, body := r.post("/api/run", `{}`)
-	if res.StatusCode != 409 || !strings.Contains(body, "another scout run") {
+	if res.StatusCode != 409 || !strings.Contains(body, "holds the run lock") {
 		t.Fatalf("%d %s", res.StatusCode, body)
 	}
 	unlock()
@@ -368,7 +367,7 @@ func TestCancellingTheServerContextStopsARunningJob(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Wait did not return after the context was cancelled")
 	}
-	if lj := r.status().LastJob; lj == nil || lj.ExitCode != 2 {
+	if lj := r.status().LastJob; lj == nil || lj.ExitCode != 3 || lj.Meaning != "stopped" {
 		t.Fatalf("last job = %+v", lj)
 	}
 }
@@ -496,44 +495,6 @@ func TestNoExportFolderMeansNoReports(t *testing.T) {
 	}
 }
 
-func TestNextRunStates(t *testing.T) {
-	r := newRig(t)
-	if nr := r.status().NextRun; nr.Error == "" || nr.At != nil {
-		t.Fatalf("without a scheduler query: %+v", nr)
-	}
-
-	next := fixedNow.Add(24 * time.Hour)
-	var failWith error
-	r.s.NextRun = func(context.Context) (time.Time, error) { return next, failWith }
-	if nr := r.status().NextRun; !nr.Pending || nr.At != nil {
-		t.Fatalf("before the first answer: %+v", nr)
-	}
-	r.s.RefreshNext(context.Background())
-	if nr := r.status().NextRun; nr.At == nil || !nr.At.Equal(next) || nr.Pending || nr.Error != "" {
-		t.Fatalf("after: %+v", nr)
-	}
-
-	failWith = errors.New("task TheLabScout is not installed")
-	r.s.RefreshNext(context.Background())
-	if nr := r.status().NextRun; nr.At != nil || !strings.Contains(nr.Error, "not installed") {
-		t.Fatalf("a failing query: %+v", nr)
-	}
-}
-
-func TestRefreshNextGivesUpOnASlowScheduler(t *testing.T) {
-	r := newRig(t)
-	r.s.NextRun = func(ctx context.Context) (time.Time, error) {
-		<-ctx.Done()
-		return time.Time{}, ctx.Err()
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	r.s.RefreshNext(ctx)
-	if nr := r.status().NextRun; nr.Error == "" {
-		t.Fatalf("%+v", nr)
-	}
-}
-
 func TestHasLatestOnlyOnceAnExportExists(t *testing.T) {
 	r := newRig(t)
 	if r.status().HasLatest {
@@ -544,5 +505,118 @@ func TestHasLatestOnlyOnceAnExportExists(t *testing.T) {
 	export.Snapshot(src, r.exports, fixedNow, false)
 	if !r.status().HasLatest {
 		t.Fatal("latest.html exists now")
+	}
+}
+
+func TestStopCancelsTheRunningJobAndTheServerAcceptsANewOne(t *testing.T) {
+	r := newRig(t)
+	r.post("/api/run", `{"limit":4}`)
+	r.waitCalls(1)
+	res, body := r.post("/api/stop", ``)
+	if res.StatusCode != 202 || !strings.Contains(body, "Stopping") {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+	r.s.Wait()
+
+	st := r.status()
+	if st.Running != nil {
+		t.Fatalf("still running: %+v", st.Running)
+	}
+	lj := st.LastJob
+	if lj == nil || !lj.Stopped || lj.ExitCode != 3 || lj.Meaning != "stopped" || lj.Kind != KindRun {
+		t.Fatalf("last job = %+v", lj)
+	}
+	if res, _ := r.post("/api/run", `{}`); res.StatusCode != 202 {
+		t.Fatalf("a new run after a stop: %d", res.StatusCode)
+	}
+	r.finish()
+}
+
+func TestStopAlsoStopsAPatternPass(t *testing.T) {
+	r := newRig(t)
+	r.post("/api/patterns", ``)
+	r.waitCalls(1)
+	if res, _ := r.post("/api/stop", ``); res.StatusCode != 202 {
+		t.Fatalf("%d", res.StatusCode)
+	}
+	r.s.Wait()
+	if lj := r.status().LastJob; lj == nil || lj.Kind != KindPatterns || !lj.Stopped {
+		t.Fatalf("last job = %+v", lj)
+	}
+}
+
+func TestStatusSaysStoppingUntilAJobThatIgnoresTheStopHasWoundDown(t *testing.T) {
+	r := newRig(t)
+	r.s.Runner = func(ctx context.Context, kind string, req JobRequest) int {
+		r.mu.Lock()
+		r.calls = append(r.calls, call{kind, req})
+		r.mu.Unlock()
+		<-r.release // deliberately ignores ctx: a slow job
+		return 3
+	}
+	r.post("/api/run", `{}`)
+	r.waitCalls(1)
+	r.post("/api/stop", ``)
+	if st := r.status(); st.Running == nil || !st.Running.Stopping {
+		t.Fatalf("running = %+v", st.Running)
+	}
+	if res, body := r.post("/api/stop", ``); res.StatusCode != 202 || !strings.Contains(body, "Already stopping") {
+		t.Fatalf("a second stop: %d %s", res.StatusCode, body)
+	}
+	if res, _ := r.post("/api/run", `{}`); res.StatusCode != 409 {
+		t.Fatalf("a new run while one is winding down: %d", res.StatusCode)
+	}
+	r.finish()
+	if lj := r.status().LastJob; lj == nil || !lj.Stopped {
+		t.Fatalf("last job = %+v", lj)
+	}
+}
+
+func TestStopWithNothingRunningIsRefused(t *testing.T) {
+	r := newRig(t)
+	res, body := r.post("/api/stop", ``)
+	if res.StatusCode != 409 || !strings.Contains(body, "nothing is running") {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+}
+
+func TestStopCannotReachARunThisConsoleDidNotStart(t *testing.T) {
+	r := newRig(t)
+	unlock, err := r.st.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	res, body := r.post("/api/stop", ``)
+	if res.StatusCode != 409 || !strings.Contains(body, "not started from this console") {
+		t.Fatalf("%d %s", res.StatusCode, body)
+	}
+}
+
+func TestStopNeedsTheSameGuardAsEveryOtherWrite(t *testing.T) {
+	r := newRig(t)
+	r.post("/api/run", `{}`)
+	r.waitCalls(1)
+	for name, headers := range map[string]map[string]string{
+		"no header":      nil,
+		"foreign origin": {RequestHeader: "1", "Origin": "https://evil.example.com"},
+	} {
+		if res, _ := r.do("POST", "/api/stop", "", headers); res.StatusCode != 403 {
+			t.Errorf("%s: %d", name, res.StatusCode)
+		}
+	}
+	if r.status().Running == nil || r.status().Running.Stopping {
+		t.Fatal("a rejected request must not stop the run")
+	}
+	r.finish()
+}
+
+func TestAFinishedJobIsNotMarkedStoppedJustBecauseTheServerStops(t *testing.T) {
+	r := newRig(t)
+	r.post("/api/run", `{}`)
+	r.waitCalls(1)
+	r.finish()
+	if lj := r.status().LastJob; lj == nil || lj.Stopped || lj.ExitCode != 0 {
+		t.Fatalf("last job = %+v", lj)
 	}
 }

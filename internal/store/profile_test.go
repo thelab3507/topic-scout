@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +137,38 @@ func TestSettingsFileWithAByteOrderMarkStillLoads(t *testing.T) {
 	os.WriteFile(filepath.Join(st.Dir, SettingsName), body, 0o644)
 	if s, err := st.LoadSettings(); err != nil || s.ExportDir != "E:/x" {
 		t.Fatalf("%+v %v", s, err)
+	}
+}
+
+func TestALockLeftByAProcessThatIsGoneIsStaleAtOnce(t *testing.T) {
+	st, _ := Open(filepath.Join(t.TempDir(), "d"))
+	lock := filepath.Join(st.Dir, "run.lock")
+
+	// Written just now, but by a process id nothing is running under: the
+	// console was killed or the user logged off mid-run.
+	os.WriteFile(lock, []byte("2147480000\n"), 0o600)
+	if st.Locked() {
+		t.Fatal("a fresh lock from a dead process must not read as a run in progress")
+	}
+	unlock, err := st.Lock()
+	if err != nil {
+		t.Fatalf("a new run must be able to take over a dead run's lock: %v", err)
+	}
+	unlock()
+
+	// The same file written by this live process is held.
+	os.WriteFile(lock, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	if !st.Locked() {
+		t.Fatal("a lock held by a live process must read as held")
+	}
+	if _, err := st.Lock(); err == nil {
+		t.Fatal("a second Lock must fail while the first process is alive")
+	}
+	os.Remove(lock)
+
+	// Content that is not a process id yet (still being written) counts as held.
+	os.WriteFile(lock, []byte(""), 0o600)
+	if !st.Locked() {
+		t.Fatal("an empty fresh lock is being written, so it is held")
 	}
 }

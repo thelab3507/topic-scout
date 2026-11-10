@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -9,12 +8,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
-	"runtime"
-	"strings"
 	"time"
 
 	"github.com/thelab3507/topic-scout/internal/config"
@@ -26,16 +21,13 @@ import (
 	"github.com/thelab3507/topic-scout/internal/store"
 )
 
-const (
-	defaultAddr     = "127.0.0.1:8787"
-	defaultTaskName = "TheLabScout"
-)
+const defaultAddr = "127.0.0.1:8787"
 
 // exportEnv names the environment variable that sets the export folder.
 const exportEnv = "THELAB_SCOUT_EXPORTS"
 
 // exportDir picks the export folder: the flag, then THELAB_SCOUT_EXPORTS, then
-// export_dir in settings.json in the data directory (which is how the scheduled
+// export_dir in settings.json in the data directory (which is how the hidden logon
 // task, started with no flags, finds it). "" means exports are off.
 func exportDir(flagValue string, st *store.Store) (string, error) {
 	dir := flagValue
@@ -77,15 +69,12 @@ func exportLatest(st *store.Store, dir string) {
 	}
 }
 
-var taskNameOK = regexp.MustCompile(`^[A-Za-z0-9_. -]{1,100}$`)
-
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", "sources.json", "path to sources.json")
 	dir := fs.String("data-dir", "", "data directory")
 	expFlag := fs.String("export-dir", "", "folder (outside any git repo) that receives a copy of every digest")
 	addr := fs.String("addr", defaultAddr, "address to listen on (loopback only)")
-	task := fs.String("task-name", defaultTaskName, "Windows scheduled task to read the next run time from")
 	open := fs.Bool("open", false, "open the console in your browser")
 	if err := fs.Parse(args); err != nil {
 		return run.ExitError
@@ -96,10 +85,6 @@ func cmdServe(args []string) int {
 	}
 	if err := serve.ValidAddr(*addr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return run.ExitError
-	}
-	if !taskNameOK.MatchString(*task) {
-		fmt.Fprintf(os.Stderr, "task name %q has characters a scheduled task name does not\n", *task)
 		return run.ExitError
 	}
 	d, err := dataDir(*dir)
@@ -142,10 +127,8 @@ func cmdServe(args []string) int {
 		ExportDir: exp,
 		Runner:    consoleRunner(st, *cfgPath, exp),
 		Now:       time.Now,
-		NextRun:   scheduledNextRun(*task),
 	}
 	srv.Start(ctx)
-	go srv.WatchNext(ctx)
 
 	httpSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -184,7 +167,7 @@ func cmdServe(args []string) int {
 // show it. sources.json is read again for every run, so edits apply at once.
 func consoleRunner(st *store.Store, cfgPath, exportDir string) serve.Runner {
 	return func(ctx context.Context, kind string, req serve.JobRequest) int {
-		logw := newLog(st.Dir, true)
+		logw := newLog(st.Dir)
 		defer logw.Close()
 		switch kind {
 		case serve.KindRun:
@@ -211,47 +194,4 @@ func consoleRunner(st *store.Store, cfgPath, exportDir string) serve.Runner {
 		fmt.Fprintf(logw, "unknown job %q\n", kind)
 		return run.ExitError
 	}
-}
-
-// --- next scheduled run ---------------------------------------------------------
-
-// nextRunScript reads the task name from the environment, so a task name is
-// never spliced into script text.
-const nextRunScript = `$ErrorActionPreference = 'Stop'
-$info = Get-ScheduledTaskInfo -TaskName $env:SCOUT_TASK
-if (-not $info.NextRunTime -or $info.NextRunTime.Year -lt 2000) { 'none' } else { $info.NextRunTime.ToString('o') }`
-
-// scheduledNextRun returns a function that asks Windows Task Scheduler when the
-// named task fires next, or nil where there is no Task Scheduler.
-func scheduledNextRun(task string) func(ctx context.Context) (time.Time, error) {
-	if runtime.GOOS != "windows" {
-		return nil
-	}
-	return func(ctx context.Context) (time.Time, error) {
-		cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", nextRunScript)
-		cmd.Env = append(os.Environ(), "SCOUT_TASK="+task)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			if ctx.Err() != nil {
-				return time.Time{}, errors.New("the scheduler did not answer in time")
-			}
-			return time.Time{}, fmt.Errorf("task %q was not found; install it with scripts\\install-task.ps1", task)
-		}
-		return parseNextRun(string(out), task)
-	}
-}
-
-// parseNextRun reads the script's output: an ISO 8601 time, or "none".
-func parseNextRun(out, task string) (time.Time, error) {
-	s := strings.TrimSpace(out)
-	if s == "" || s == "none" {
-		return time.Time{}, fmt.Errorf("task %q has no next run (is it disabled?)", task)
-	}
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("could not read the next run time %q", s)
-	}
-	return t, nil
 }

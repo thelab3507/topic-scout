@@ -72,9 +72,9 @@ func (o Options) patternPass(ctx context.Context, profile string, force bool, lo
 	return code
 }
 
-// Patterns is `scout patterns`: it forces a pattern pass now, health check
+// Patterns is the console's "Update patterns": it forces a pattern pass now, health check
 // first, then rebuilds the digest. It takes the run lock so it cannot overlap a
-// scheduled run, since the server handles one call at a time.
+// run, since the server handles one call at a time.
 func Patterns(ctx context.Context, o Options) int {
 	logf := func(format string, args ...any) { fmt.Fprintf(o.Log, format+"\n", args...) }
 	unlock, err := o.Store.Lock()
@@ -92,6 +92,9 @@ func Patterns(ctx context.Context, o Options) int {
 	o.Scorer.Profile = profile
 
 	code := o.patternPass(ctx, profile, true, logf)
+	if ctx.Err() != nil {
+		code = ExitStopped
+	}
 	if err := RenderDigest(o.Store, o.Now(), "", profile); err != nil {
 		logf("could not write digest: %v", err)
 		if code == ExitOK {

@@ -74,12 +74,6 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
-func TestRunWithMissingConfigFails(t *testing.T) {
-	if code := realMain([]string{"run", "--config", filepath.Join(t.TempDir(), "nope.json"), "--dry-run"}); code != run.ExitError {
-		t.Fatalf("exit %d", code)
-	}
-}
-
 func TestDataDirPrecedence(t *testing.T) {
 	t.Setenv("THELAB_SCOUT_DATA", "/from/env")
 	if d, _ := dataDir("/from/flag"); d != "/from/flag" {
@@ -178,12 +172,6 @@ func TestBriefRejectsBadInput(t *testing.T) {
 	}
 }
 
-func TestPatternsRejectsBadFlagsWithoutTouchingTheServer(t *testing.T) {
-	if code := realMain([]string{"patterns", "--no-such-flag"}); code != run.ExitError {
-		t.Fatalf("exit %d", code)
-	}
-}
-
 func TestMarkRendersTheDigestWithTheProfileInTheRubricVersion(t *testing.T) {
 	dir, st := seeded(t)
 	if err := os.WriteFile(filepath.Join(dir, "profile.md"), []byte("Go preferred."), 0o644); err != nil {
@@ -198,14 +186,6 @@ func TestMarkRendersTheDigestWithTheProfileInTheRubricVersion(t *testing.T) {
 	}
 	if !strings.Contains(string(html), "scout brief abc123def456") {
 		t.Fatal("cards must offer the brief command")
-	}
-}
-
-func TestUsageMentionsTheNewCommands(t *testing.T) {
-	for _, want := range []string{"scout patterns", "scout brief", "profile.md"} {
-		if !strings.Contains(usage, want) {
-			t.Errorf("usage lacks %q", want)
-		}
 	}
 }
 
@@ -286,25 +266,12 @@ func TestServeRefusesBadInputBeforeListening(t *testing.T) {
 		"no port":          {"serve", "--data-dir", dir, "--addr", "127.0.0.1"},
 		"extra argument":   {"serve", "--data-dir", dir, "now"},
 		"bad flag":         {"serve", "--no-such-flag"},
-		"bad task name":    {"serve", "--data-dir", dir, "--task-name", "x'; calc"},
 		"export in a repo": {"serve", "--data-dir", dir, "--export-dir", filepath.Join(repo, "out")},
 		"missing config":   {"serve", "--data-dir", dir, "--config", filepath.Join(dir, "nope.json")},
 	}
 	for name, args := range cases {
 		if code := realMain(args); code != run.ExitError {
 			t.Errorf("%s: exit %d, want %d", name, code, run.ExitError)
-		}
-	}
-}
-
-func TestParseNextRun(t *testing.T) {
-	got, err := parseNextRun("2026-11-10T09:00:00.0000000+08:00\r\n", "TheLabScout")
-	if err != nil || got.UTC() != time.Date(2026, 11, 10, 1, 0, 0, 0, time.UTC) {
-		t.Fatalf("%v %v", got, err)
-	}
-	for _, bad := range []string{"", "none", "tomorrow", "10/11/2026"} {
-		if _, err := parseNextRun(bad, "TheLabScout"); err == nil {
-			t.Errorf("%q must fail", bad)
 		}
 	}
 }
@@ -348,5 +315,51 @@ func TestUsageMentionsServeAndTheExportFolder(t *testing.T) {
 		if !strings.Contains(usage, want) {
 			t.Errorf("usage lacks %q", want)
 		}
+	}
+}
+
+func TestNoCommandStartsTheScoutExceptTheConsole(t *testing.T) {
+	dir, _ := seeded(t)
+	for _, args := range [][]string{
+		{"run", "--data-dir", dir}, {"run", "--dry-run"}, {"patterns", "--data-dir", dir},
+	} {
+		if code := realMain(args); code != run.ExitError {
+			t.Errorf("%v: exit %d, want %d", args, code, run.ExitError)
+		}
+	}
+	for _, gone := range []string{"scout run", "scout patterns"} {
+		if strings.Contains(usage, gone) {
+			t.Errorf("usage still lists %q", gone)
+		}
+	}
+	for _, want := range []string{"scout serve", "profile.md", "only way to start and stop"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage lacks %q", want)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		for _, e := range entries {
+			if e.Name() == "scout.log" || e.Name() == "run.lock" {
+				t.Errorf("a refused command wrote %s", e.Name())
+			}
+		}
+	}
+}
+
+func TestConsoleRunnerReportsAStopWhenItsContextIsCancelled(t *testing.T) {
+	dir, st := seeded(t)
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `<rss version="2.0"><channel></channel></rss>`)
+	}))
+	defer feed.Close()
+	cfg := filepath.Join(dir, "sources.json")
+	os.WriteFile(cfg, []byte(`{"sources":[{"name":"feed","type":"rss","url":"`+feed.URL+`","category":"tech","max_items":5}]}`), 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := consoleRunner(st, cfg, "")(ctx, serve.KindRun, serve.JobRequest{}); code != run.ExitStopped {
+		t.Fatalf("exit %d, want %d", code, run.ExitStopped)
+	}
+	if lr, _ := st.ReadLastRun(); lr == nil || lr.Outcome != "stopped" {
+		t.Fatalf("last run = %+v", lr)
 	}
 }

@@ -813,3 +813,87 @@ func TestPatternsCommandRefreshesLatestWithoutArchiving(t *testing.T) {
 		t.Fatalf("a patterns pass is not a run: %v", reports)
 	}
 }
+
+func TestStoppingMidScoringKeepsWhatWasScoredAndTheRestIsPickedUpNextRun(t *testing.T) {
+	e := setup(t, "Alpha tool released", "Beta framework benchmark", "Gamma compiler announced")
+	dir := e.exportTo(t)
+	reached, release := make(chan struct{}), make(chan struct{})
+	e.inferFn = func(n int) (int, string) {
+		if n == 2 { // the second call hangs until the test has pressed Stop
+			close(reached)
+			<-release
+		}
+		return 200, envelope(goodOutput)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int)
+	go func() { done <- Run(ctx, e.opts) }()
+	<-reached
+	cancel()
+	code := <-done
+	close(release)
+
+	if code != ExitStopped {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	lr := e.lastRun(t)
+	if lr.Outcome != "stopped" || lr.Scored != 1 || !strings.Contains(lr.Message, "picked up next run") {
+		t.Fatalf("last run = %+v", lr)
+	}
+	if recs, _ := e.st.Results(time.Time{}); len(recs) != 1 {
+		t.Fatalf("only the finished candidate may be recorded, got %d", len(recs))
+	}
+	if reports, _ := export.List(dir); len(reports) != 1 {
+		t.Fatalf("a stopped run that scored something is archived: %v", reports)
+	}
+	if html, _ := os.ReadFile(e.st.DigestPath()); !strings.Contains(string(html), "stopped before it finished") {
+		t.Error("the digest must say the last run was stopped")
+	}
+
+	// Nothing was lost: the next run scores exactly the two that were left.
+	e.inferFn = func(int) (int, string) { return 200, envelope(goodOutput) }
+	if code := e.run(); code != ExitOK {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	if recs, _ := e.st.Results(time.Time{}); len(recs) != 3 {
+		t.Fatalf("want 3 results after the second run, got %d", len(recs))
+	}
+}
+
+func TestStoppedBeforeAnythingStartsTouchesNoServer(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := Run(ctx, e.opts); code != ExitStopped {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+	if e.inferReqs != 0 {
+		t.Fatalf("a stopped run called the server %d times", e.inferReqs)
+	}
+	if lr := e.lastRun(t); lr.Outcome != "stopped" {
+		t.Fatalf("%+v", lr)
+	}
+}
+
+func TestStoppedDryRunReturnsStoppedWithoutWritingState(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.opts.DryRun = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := Run(ctx, e.opts); code != ExitStopped {
+		t.Fatalf("exit %d", code)
+	}
+	if lr, _ := e.st.ReadLastRun(); lr != nil {
+		t.Fatalf("a dry run writes no state: %+v", lr)
+	}
+}
+
+func TestStoppingAPatternPassReportsStopped(t *testing.T) {
+	e := setup(t, "Alpha tool released")
+	e.seedTagged(t, 3, "local llm")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := Patterns(ctx, e.opts); code != ExitStopped {
+		t.Fatalf("exit %d\n%s", code, e.log)
+	}
+}
