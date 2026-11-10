@@ -14,7 +14,7 @@
       <p class="eyebrow muted">The Lab</p>
       <h1>Scout console</h1>
     </div>
-    <p class="muted"><a href="/digest" id="open-digest">Open the current digest</a></p>
+    <p class="muted"><a href="#reports-h">All reports</a></p>
   </div>
   <p class="lead muted">Start or stop a run, follow the log and open earlier reports. The scout runs only when you start it here, and everything stays on this PC.</p>
 
@@ -37,6 +37,7 @@
         </div>
         <label class="check"><input type="checkbox" id="dry"> Dry run (fetch and dedupe only)</label>
         <span class="spacer"></span>
+        <a class="btn outline" id="open-latest" href="/digest" target="_blank" rel="noopener">Open latest report</a>
         <button class="btn outline" id="btn-stop" type="button" disabled>Stop</button>
         <button class="btn outline" id="btn-patterns" type="button">Update patterns</button>
         <button class="btn" id="btn-run" type="button">Run scout</button>
@@ -44,6 +45,13 @@
       <p class="muted" id="job-note"></p>
     </div>
   </div>
+
+  <h2 id="reports-h">Reports</h2>
+  <p class="section-note muted" id="reports-note"></p>
+  <div class="card"><div class="table-wrap"><table class="reports" id="reports">
+    <thead><tr><th>Report</th><th>Size</th></tr></thead>
+    <tbody></tbody>
+  </table></div></div>
 
   <h2>Last run</h2>
   <div class="card">
@@ -53,13 +61,6 @@
   <h2>Log</h2>
   <p class="section-note muted">The end of <code>scout.log</code>, refreshed while this page is open.</p>
   <pre class="log" id="log" tabindex="0" aria-label="scout.log"></pre>
-
-  <h2>Reports</h2>
-  <p class="section-note muted" id="reports-note"></p>
-  <div class="card"><div class="table-wrap"><table class="reports" id="reports">
-    <thead><tr><th>Run finished</th><th>Size</th></tr></thead>
-    <tbody></tbody>
-  </table></div></div>
 
   <footer class="muted">Listening on localhost only. Nothing on this page leaves your machine.</footer>
 </main>
@@ -117,7 +118,9 @@ function render(st) {
   $("job-note").textContent = lj
     ? "Last job from here: " + lj.kind + (lj.dry_run ? " (dry run)" : "") + ", " + (lj.stopped ? "stopped by you" : lj.meaning) + ", finished " + when(lj.finished_at) + "."
     : "";
-  $("open-digest").style.display = st.has_digest ? "" : "none";
+  const ol = $("open-latest");
+  ol.href = st.has_latest ? "/reports/latest.html" : "/digest";
+  ol.style.display = st.has_latest || st.has_digest ? "" : "none";
 
   renderLastRun(lr);
   renderLog(st.log || []);
@@ -161,11 +164,13 @@ function renderReports(st) {
   } else if (st.export_error) {
     note.textContent = "The export folder cannot be used: " + st.export_error;
   } else {
-    note.textContent = "Every finished run leaves a dated copy of the digest in " + st.export_dir + ". Each file opens on its own.";
+    note.textContent = "Every finished run leaves a dated copy of the digest in " + st.export_dir + ", newest first. Each one opens on its own.";
   }
   const rows = [];
-  if (st.has_latest) rows.push({ label: "Latest export", href: "/reports/latest.html", size: null });
-  for (const r of st.reports || []) rows.push({ label: fmt.format(new Date(r.at)), href: "/reports/" + encodeURIComponent(r.name), size: r.size });
+  if (st.has_latest) rows.push({ label: "Latest report", href: "/reports/latest.html", size: null });
+  if (st.has_digest) rows.push({ label: "Current digest (live: updates while a run is going)", href: "/digest", size: null });
+  const arch = [...(st.reports || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+  for (const r of arch) rows.push({ label: when(r.at), href: "/reports/" + encodeURIComponent(r.name), size: r.size });
   if (!rows.length) {
     const tr = document.createElement("tr"), td = document.createElement("td");
     td.colSpan = 2; td.className = "muted"; td.textContent = "No reports yet.";
